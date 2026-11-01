@@ -1,0 +1,7 @@
+param(
+    [switch]$BundleFfmpeg = $false,
+    [switch]$SkipTests = $false,
+    [switch]$CreateZip = $true
+)
+
+& "$PSScriptRoot\scripts\build_windows.ps1" -BundleFfmpeg:$BundleFfmpeg -SkipTests:$SkipTests -CreateZip:$CreateZip
