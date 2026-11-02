@@ -122,14 +122,63 @@ Users can simply unzip the release package and:
 
 ### Linux & macOS Production Build (Cross-Platform)
 
-When building on macOS or Linux:
+When building on Linux:
 ```bash
+# Install development headers
+sudo apt-get install -y libasound2-dev libudev-dev pkg-config libx11-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libfontconfig1-dev libfreetype6-dev ffmpeg
+
+# Build and package
 chmod +x scripts/build_unix.sh
 ./scripts/build_unix.sh
 ```
 
 **Build Output:**
-- `dist/airmedia-v0.1.0-<os>-<arch>.tar.gz`
+- `dist/airmedia-v<version>-linux-x86_64.tar.gz` and `.sha256`
+
+When building on macOS:
+```bash
+chmod +x scripts/build_macos.sh
+./scripts/build_macos.sh
+```
+
+**Build Output:**
+- `dist/airmedia-v<version>-macos-arm64.tar.gz` (Apple Silicon)
+- `dist/airmedia-v<version>-macos-x64.tar.gz` (Intel)
+- `dist/airmedia-v<version>-macos-universal.tar.gz` (Universal binary for both architectures)
+- SHA-256 checksum files for each package
+
+---
+
+## 🤖 Automated CI/CD & GitHub Releases
+
+AirMedia includes a fully automated GitHub Actions workflow (`.github/workflows/release.yml`) that compiles, tests, packages, and signs all releases across Windows, Linux, and macOS.
+
+### Triggering a Production Release
+
+1. **Push a Version Tag**:
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+   GitHub Actions will automatically run the parallel build matrix, generate packages for all operating systems and architectures, create the GitHub Release, and attach all archives and consolidated `SHA256SUMS.txt`.
+
+2. **Manual Dispatch (One-Click Release)**:
+   - Navigate to **Actions** ➔ **Release** on GitHub.
+   - Click **Run workflow**.
+   - Optionally provide a custom tag name, or choose to create a draft/pre-release, or test-build artifacts without publishing.
+
+### Release Matrix Artifacts
+
+| Platform | Architecture | Package | Description |
+|---|---|---|---|
+| **Windows** | x86_64 | `airmedia-v<version>-windows-x64.zip` | Stripped binary with automated setup scripts |
+| **Linux** | x86_64 | `airmedia-v<version>-linux-x86_64.tar.gz` | Optimized binary for modern Linux distributions |
+| **macOS** | Apple Silicon (arm64) | `airmedia-v<version>-macos-arm64.tar.gz` | Native M1/M2/M3/M4 Apple Silicon build |
+| **macOS** | Intel (x86_64) | `airmedia-v<version>-macos-x64.tar.gz` | Native 64-bit Intel Mac build |
+| **macOS** | Universal | `airmedia-v<version>-macos-universal.tar.gz` | Multi-architecture binary running on any Mac |
+| **All** | All | `SHA256SUMS.txt` | Consolidated SHA-256 verification checksums |
+
+---
 
 ### Run Automated Tests
 ```bash

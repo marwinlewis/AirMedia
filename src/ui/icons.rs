@@ -13,6 +13,8 @@ pub enum Icon {
     Pause,
     Prev,
     Next,
+    StepForward,
+    StepBackward,
     VolumeHigh,
     VolumeLow,
     VolumeMute,
@@ -21,6 +23,7 @@ pub enum Icon {
     Playlist,
     Subtitles,
     Settings,
+    Camera,
     Menu,
     Close,
     Plus,
@@ -67,6 +70,28 @@ impl Icon {
                     egui::CornerRadius::same((0.8 * u) as u8),
                     color,
                 );
+            }
+            Icon::StepForward => {
+                // Outer film frame
+                painter.rect_stroke(
+                    Rect::from_min_max(p(3.5, 5.5), p(20.5, 18.5)),
+                    egui::CornerRadius::same((2.0 * u) as u8),
+                    Stroke::new(1.4 * u, color),
+                    egui::StrokeKind::Middle,
+                );
+                // Step arrow inside
+                poly(vec![p(9.5, 8.5), p(9.5, 15.5), p(15.5, 12.0)]);
+            }
+            Icon::StepBackward => {
+                // Outer film frame
+                painter.rect_stroke(
+                    Rect::from_min_max(p(3.5, 5.5), p(20.5, 18.5)),
+                    egui::CornerRadius::same((2.0 * u) as u8),
+                    Stroke::new(1.4 * u, color),
+                    egui::StrokeKind::Middle,
+                );
+                // Step arrow inside
+                poly(vec![p(14.5, 8.5), p(14.5, 15.5), p(8.5, 12.0)]);
             }
             Icon::VolumeHigh | Icon::VolumeLow | Icon::VolumeMute => {
                 poly(vec![p(3.5, 9.0), p(7.5, 9.0), p(12.5, 4.5), p(12.5, 19.5), p(7.5, 15.0), p(3.5, 15.0)]);
@@ -117,6 +142,21 @@ impl Icon {
                     line(p(4.0, y), p(20.0, y));
                     painter.circle_filled(p(knob, y), 2.6 * u, color);
                 }
+            }
+            Icon::Camera => {
+                // Camera body
+                painter.rect_stroke(
+                    Rect::from_min_max(p(3.0, 7.5), p(21.0, 19.5)),
+                    egui::CornerRadius::same((2.0 * u) as u8),
+                    stroke,
+                    egui::StrokeKind::Middle,
+                );
+                // Camera top viewfinder bump
+                open_path(vec![p(8.0, 7.5), p(9.5, 5.0), p(14.5, 5.0), p(16.0, 7.5)]);
+                // Lens
+                painter.circle_stroke(p(12.0, 13.5), 3.6 * u, stroke);
+                // Flash dot
+                painter.circle_filled(p(18.0, 10.0), 0.9 * u, color);
             }
             Icon::Menu => {
                 line(p(4.0, 7.0), p(20.0, 7.0));

@@ -18,6 +18,60 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ScreenshotFormat {
+    #[default]
+    Jpg,
+    Png,
+    Bmp,
+}
+
+impl ScreenshotFormat {
+    pub fn extension(&self) -> &'static str {
+        match self {
+            Self::Jpg => "jpg",
+            Self::Png => "png",
+            Self::Bmp => "bmp",
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Jpg => "JPEG (.jpg)",
+            Self::Png => "PNG (.png)",
+            Self::Bmp => "BMP (.bmp)",
+        }
+    }
+
+    pub const ALL: [ScreenshotFormat; 3] = [
+        ScreenshotFormat::Jpg,
+        ScreenshotFormat::Png,
+        ScreenshotFormat::Bmp,
+    ];
+}
+
+pub fn default_pictures_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            let p = PathBuf::from(profile).join("Pictures");
+            if p.exists() || std::fs::create_dir_all(&p).is_ok() {
+                return p;
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let p = PathBuf::from(home).join("Pictures");
+            if p.exists() || std::fs::create_dir_all(&p).is_ok() {
+                return p;
+            }
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
 pub fn create_hidden_command(program: &str) -> Command {
     let resolved = resolve_binary_path(program);
     let mut cmd = Command::new(resolved);
@@ -45,6 +99,7 @@ pub struct MediaPlayer {
     pub is_playing: bool,
     pub manual_clock_secs: f64,
     pub last_tick: std::time::Instant,
+    pub stepped_while_paused: bool,
 }
 
 impl MediaPlayer {
@@ -72,6 +127,7 @@ impl MediaPlayer {
             is_playing: false,
             manual_clock_secs: 0.0,
             last_tick: std::time::Instant::now(),
+            stepped_while_paused: false,
         }
     }
 
@@ -86,6 +142,7 @@ impl MediaPlayer {
         self.media_info = Some(info.clone());
         self.manual_clock_secs = 0.0;
         self.last_tick = std::time::Instant::now();
+        self.stepped_while_paused = false;
 
         // Discover and extract embedded subtitle streams
         self.subtitles.clear();
@@ -210,6 +267,12 @@ impl MediaPlayer {
     pub fn resume(&mut self) {
         self.is_playing = true;
         self.last_tick = std::time::Instant::now();
+        if self.stepped_while_paused {
+            self.stepped_while_paused = false;
+            let cur = self.current_time_secs();
+            self.start_playback_at(cur);
+            return;
+        }
         if let Some(audio) = &self.audio_engine {
             audio.resume();
         }
@@ -218,6 +281,7 @@ impl MediaPlayer {
 
     pub fn stop(&mut self) {
         self.is_playing = false;
+        self.stepped_while_paused = false;
         if let Some(audio) = &mut self.audio_engine {
             audio.stop();
         }
@@ -227,20 +291,35 @@ impl MediaPlayer {
 
     pub fn seek(&mut self, target_secs: f64) {
         let clamped = target_secs.clamp(0.0, self.duration_secs.max(0.1));
+        self.stepped_while_paused = false;
         self.start_playback_at(clamped);
     }
 
     pub fn step_frame(&mut self, forward: bool) {
+        if self.is_playing {
+            self.pause();
+        }
+        self.stepped_while_paused = true;
+
         let fps = self.media_info.as_ref().map_or(30.0, |m| m.fps());
         let frame_duration = 1.0 / fps;
-        let cur = self.current_time_secs();
-        let target = if forward {
-            cur + frame_duration
+
+        if forward {
+            if self.video_decoder.is_running() {
+                self.video_decoder.step_forward();
+                self.manual_clock_secs = (self.manual_clock_secs + frame_duration).min(self.duration_secs);
+            } else {
+                let cur = self.current_time_secs();
+                let target = (cur + frame_duration).min(self.duration_secs);
+                self.start_playback_at(target);
+                self.pause();
+            }
         } else {
-            (cur - frame_duration).max(0.0)
-        };
-        self.seek(target);
-        self.pause();
+            let cur = self.current_time_secs();
+            let target = (cur - frame_duration).max(0.0);
+            self.start_playback_at(target);
+            self.pause();
+        }
     }
 
     pub fn set_speed(&mut self, speed: f32) {
@@ -319,16 +398,18 @@ impl MediaPlayer {
             .as_ref()
             .map_or(false, |m| !m.audio_streams().is_empty());
 
-        if let Some(audio) = &self.audio_engine {
-            if has_audio {
-                return audio.current_time_secs().min(self.duration_secs);
-            }
-        }
-
         if self.is_playing {
+            if let Some(audio) = &self.audio_engine {
+                if has_audio {
+                    return audio.current_time_secs().min(self.duration_secs);
+                }
+            }
+
             let elapsed = self.last_tick.elapsed().as_secs_f64() * (self.playback_speed as f64);
             self.last_tick = std::time::Instant::now();
             self.manual_clock_secs += elapsed;
+        } else if let Some(frame) = self.video_decoder.get_latest_frame() {
+            self.manual_clock_secs = frame.pts_secs;
         }
 
         self.manual_clock_secs.min(self.duration_secs)
@@ -348,31 +429,93 @@ impl MediaPlayer {
             .map_or([0.0; 16], |a| a.get_visualizer())
     }
 
-    pub fn take_snapshot(&self) -> Result<PathBuf, String> {
+    pub fn take_screenshot(
+        &self,
+        output_dir: &Path,
+        format: ScreenshotFormat,
+    ) -> Result<PathBuf, String> {
         let frame = self
             .video_decoder
             .get_latest_frame()
-            .ok_or_else(|| "No video frame available to snapshot".to_string())?;
+            .ok_or_else(|| "No video frame available to screenshot".to_string())?;
+
+        if !output_dir.exists() {
+            std::fs::create_dir_all(output_dir)
+                .map_err(|e| format!("Failed to create folder {}: {e}", output_dir.display()))?;
+        }
+
+        let prefix = self
+            .current_file
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .unwrap_or("snapshot");
+
+        let safe_prefix: String = prefix
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .collect();
 
         use std::time::{SystemTime, UNIX_EPOCH};
-        let epoch_secs = SystemTime::now()
+        let epoch_millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis();
 
-        let filename = format!("snapshot_{epoch_secs}.png");
-        let path = PathBuf::from(&filename);
+        let filename = format!("{safe_prefix}_{:.2}s_{epoch_millis}.{}", frame.pts_secs, format.extension());
+        let path = output_dir.join(&filename);
 
-        image::save_buffer(
-            &path,
-            &frame.rgba_data,
-            frame.width,
-            frame.height,
-            image::ExtendedColorType::Rgba8,
-        )
-        .map_err(|e| format!("Failed to save snapshot: {e}"))?;
+        match format {
+            ScreenshotFormat::Jpg => {
+                let rgb_data: Vec<u8> = frame
+                    .rgba_data
+                    .chunks_exact(4)
+                    .flat_map(|c| [c[0], c[1], c[2]])
+                    .collect();
+                image::save_buffer_with_format(
+                    &path,
+                    &rgb_data,
+                    frame.width,
+                    frame.height,
+                    image::ExtendedColorType::Rgb8,
+                    image::ImageFormat::Jpeg,
+                )
+                .map_err(|e| format!("Failed to save JPG screenshot: {e}"))?;
+            }
+            ScreenshotFormat::Png => {
+                image::save_buffer_with_format(
+                    &path,
+                    &frame.rgba_data,
+                    frame.width,
+                    frame.height,
+                    image::ExtendedColorType::Rgba8,
+                    image::ImageFormat::Png,
+                )
+                .map_err(|e| format!("Failed to save PNG screenshot: {e}"))?;
+            }
+            ScreenshotFormat::Bmp => {
+                let rgb_data: Vec<u8> = frame
+                    .rgba_data
+                    .chunks_exact(4)
+                    .flat_map(|c| [c[0], c[1], c[2]])
+                    .collect();
+                image::save_buffer_with_format(
+                    &path,
+                    &rgb_data,
+                    frame.width,
+                    frame.height,
+                    image::ExtendedColorType::Rgb8,
+                    image::ImageFormat::Bmp,
+                )
+                .map_err(|e| format!("Failed to save BMP screenshot: {e}"))?;
+            }
+        }
 
         Ok(path)
+    }
+
+    pub fn take_snapshot(&self) -> Result<PathBuf, String> {
+        self.take_screenshot(&default_pictures_dir(), ScreenshotFormat::Jpg)
     }
 
     pub fn take_new_video_frame(&self) -> Option<VideoFrame> {

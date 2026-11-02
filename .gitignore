@@ -1,4 +1,6 @@
 /target
 *.zip
+*.tar.gz
+*.sha256
 *.lnk
-dist
+dist/

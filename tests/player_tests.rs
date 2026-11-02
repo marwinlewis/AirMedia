@@ -192,3 +192,92 @@ fn test_dependency_detection() {
     );
     assert!(status.is_ready(), "Preinstalled or local codecs should be detected");
 }
+
+#[test]
+fn test_image_formats_save() {
+    let width = 2;
+    let height = 2;
+    let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+    let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|c| [c[0], c[1], c[2]]).collect();
+    let temp_dir = std::env::temp_dir();
+    let jpg_path = temp_dir.join("test_airmedia_shot.jpg");
+    let png_path = temp_dir.join("test_airmedia_shot.png");
+    let bmp_path = temp_dir.join("test_airmedia_shot.bmp");
+
+    image::save_buffer_with_format(&jpg_path, &rgb, width, height, image::ExtendedColorType::Rgb8, image::ImageFormat::Jpeg).unwrap();
+    image::save_buffer_with_format(&png_path, &rgba, width, height, image::ExtendedColorType::Rgba8, image::ImageFormat::Png).unwrap();
+    image::save_buffer_with_format(&bmp_path, &rgb, width, height, image::ExtendedColorType::Rgb8, image::ImageFormat::Bmp).unwrap();
+
+    assert!(jpg_path.exists());
+    assert!(png_path.exists());
+    assert!(bmp_path.exists());
+
+    let _ = std::fs::remove_file(jpg_path);
+    let _ = std::fs::remove_file(png_path);
+    let _ = std::fs::remove_file(bmp_path);
+}
+
+#[test]
+fn test_preferences_defaults_and_serialization() {
+    use airmedia::media::{default_pictures_dir, ScreenshotFormat};
+    use airmedia::ui::preferences_dialog::PreferencesState;
+
+    let default_prefs = PreferencesState::default();
+    assert_eq!(default_prefs.screenshot_format, ScreenshotFormat::Jpg);
+    assert_eq!(default_prefs.screenshot_dir, default_pictures_dir());
+
+    let json = serde_json::to_string_pretty(&default_prefs).expect("Serialize preferences");
+    let deserialized: PreferencesState = serde_json::from_str(&json).expect("Deserialize preferences");
+    assert_eq!(deserialized.screenshot_format, ScreenshotFormat::Jpg);
+    assert_eq!(deserialized.screenshot_dir, default_pictures_dir());
+}
+
+#[test]
+fn test_media_player_step_frame_and_screenshot() {
+    use airmedia::media::{MediaPlayer, ScreenshotFormat};
+    use std::path::PathBuf;
+
+    let test_file = PathBuf::from("test_media.mp4");
+    if !test_file.exists() {
+        return;
+    }
+
+    let mut player = MediaPlayer::new();
+
+    let load_res = player.load_file(&test_file);
+    assert!(load_res.is_ok(), "Should load test_media.mp4");
+
+    let start_wait = std::time::Instant::now();
+    while player.get_latest_video_frame().is_none() && start_wait.elapsed() < std::time::Duration::from_secs(3) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(player.get_latest_video_frame().is_some(), "Video frame should be ready within 3s");
+
+    player.pause();
+    assert!(!player.is_playing);
+
+    let temp_dir = std::env::temp_dir().join("airmedia_test_shots");
+    let shot1 = player.take_screenshot(&temp_dir, ScreenshotFormat::Jpg);
+    assert!(shot1.is_ok(), "Screenshot 1 should succeed: {:?}", shot1.err());
+    let path1 = shot1.unwrap();
+    assert!(path1.exists(), "Screenshot file should exist: {}", path1.display());
+    assert_eq!(path1.extension().and_then(|e| e.to_str()), Some("jpg"));
+
+    let time_before = player.current_time_secs();
+    player.step_frame(true);
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let time_after = player.current_time_secs();
+    assert!(time_after >= time_before, "Stepping frame forward should advance time");
+
+    let shot2 = player.take_screenshot(&temp_dir, ScreenshotFormat::Png);
+    assert!(shot2.is_ok(), "Screenshot 2 should succeed");
+    let path2 = shot2.unwrap();
+    assert!(path2.exists(), "PNG screenshot should exist: {}", path2.display());
+    assert_eq!(path2.extension().and_then(|e| e.to_str()), Some("png"));
+
+    player.stop();
+
+    let _ = std::fs::remove_file(path1);
+    let _ = std::fs::remove_file(path2);
+    let _ = std::fs::remove_dir(temp_dir);
+}

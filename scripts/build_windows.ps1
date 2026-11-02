@@ -21,6 +21,7 @@
 #>
 
 param(
+    [string]$Version = "",
     [switch]$BundleFfmpeg = $false,
     [switch]$SkipTests = $false,
     [switch]$CreateZip = $true
@@ -30,6 +31,20 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = (Resolve-Path "$PSScriptRoot\..").Path
 Set-Location $ProjectRoot
+
+if (-not $Version) {
+    if ($env:RELEASE_VERSION) {
+        $Version = $env:RELEASE_VERSION.TrimStart('v')
+    } else {
+        $CargoToml = Get-Content (Join-Path $ProjectRoot "Cargo.toml") -Raw
+        if ($CargoToml -match '(?m)^version\s*=\s*"([^"]+)"') {
+            $Version = $Matches[1]
+        } else {
+            $Version = "0.1.0"
+        }
+    }
+}
+$Version = $Version.TrimStart('v')
 
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host "     AirMedia - Production Release Build (Windows x64)     " -ForegroundColor Cyan
@@ -110,7 +125,8 @@ if ($BundleFfmpeg) {
 # 6. Create Distribution Archive
 if ($CreateZip) {
     Write-Host "[6/6] Creating release archive (.zip)..." -ForegroundColor Yellow
-    $ZipPath = Join-Path $ProjectRoot "dist\airmedia-v0.1.0-windows-x64.zip"
+    $ZipName = "airmedia-v$Version-windows-x64.zip"
+    $ZipPath = Join-Path $ProjectRoot "dist\$ZipName"
     if (Test-Path $ZipPath) {
         Remove-Item -Force $ZipPath
     }
@@ -119,9 +135,13 @@ if ($CreateZip) {
     $ZipSize = (Get-Item $ZipPath).Length / 1MB
     $ZipHash = (Get-FileHash -Path $ZipPath -Algorithm SHA256).Hash
 
+    $Sha256Path = "$ZipPath.sha256"
+    "$ZipHash  $ZipName" | Out-File -FilePath $Sha256Path -Encoding ascii -NoNewline
+
     Write-Host "  ZIP Archive:  $ZipPath" -ForegroundColor Green
     Write-Host "  Archive Size: $($ZipSize.ToString('F2')) MB" -ForegroundColor Gray
     Write-Host "  SHA-256:      $ZipHash" -ForegroundColor Gray
+    Write-Host "  Checksum:     $Sha256Path" -ForegroundColor Gray
 }
 
 $ExeSize = (Get-Item (Join-Path $DistDir "airmedia.exe")).Length / 1MB

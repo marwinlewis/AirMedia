@@ -1,8 +1,9 @@
 use super::canvas::AspectRatioMode;
 use super::icons::{icon_button, icon_button_ex, Icon};
+use super::preferences_dialog::PreferencesState;
 use super::theme::Theme;
 use crate::media::decoder::HwAccelMode;
-use crate::media::MediaPlayer;
+use crate::media::{MediaPlayer, ScreenshotFormat};
 use crate::playlist::Playlist;
 use eframe::egui::{
     self, Align2, Popup, PopupCloseBehavior, Pos2, Rect, RectAlign, RichText, Sense, Ui, Vec2,
@@ -24,8 +25,11 @@ pub struct ControlsCtx<'a> {
     pub aspect_mode: &'a mut AspectRatioMode,
     pub show_playlist: &'a mut bool,
     pub show_info: &'a mut bool,
+    pub show_preferences: &'a mut bool,
     pub is_fullscreen: bool,
     pub toggle_fullscreen: &'a mut bool,
+    pub toast_msg: &'a mut Option<String>,
+    pub prefs: &'a mut PreferencesState,
 }
 
 impl ControlsView {
@@ -74,6 +78,15 @@ impl ControlsView {
         row.spacing_mut().item_spacing.x = 2.0;
 
         // Left cluster: transport, volume, time
+        if icon_button(&mut row, Icon::Prev, 34.0).on_hover_text("Previous track (P)").clicked() {
+            if let Some(item) = playlist.prev() {
+                let _ = player.load_file(&item.path);
+            }
+        }
+        if icon_button(&mut row, Icon::StepBackward, 34.0).on_hover_text("Previous frame (,)").clicked() {
+            player.step_frame(false);
+            *cx.toast_msg = Some("Previous frame".to_string());
+        }
         let play_icon = if player.is_playing { Icon::Pause } else { Icon::Play };
         if icon_button(&mut row, play_icon, 40.0)
             .on_hover_text(if player.is_playing { "Pause (Space)" } else { "Play (Space)" })
@@ -81,12 +94,11 @@ impl ControlsView {
         {
             player.toggle_play();
         }
-        if icon_button(&mut row, Icon::Prev, 36.0).on_hover_text("Previous (P)").clicked() {
-            if let Some(item) = playlist.prev() {
-                let _ = player.load_file(&item.path);
-            }
+        if icon_button(&mut row, Icon::StepForward, 34.0).on_hover_text("Advance frame (.)").clicked() {
+            player.step_frame(true);
+            *cx.toast_msg = Some("Next frame".to_string());
         }
-        if icon_button(&mut row, Icon::Next, 36.0).on_hover_text("Next (N)").clicked() {
+        if icon_button(&mut row, Icon::Next, 34.0).on_hover_text("Next track (N)").clicked() {
             if let Some(item) = playlist.next() {
                 let _ = player.load_file(&item.path);
             }
@@ -154,7 +166,7 @@ impl ControlsView {
 
             let settings_resp = icon_button(ui, Icon::Settings, 36.0).on_hover_text("Settings");
             popup_above(&settings_resp).width(272.0).show(|ui| {
-                settings_menu(ui, player, cx.aspect_mode, cx.show_info);
+                settings_menu(ui, player, cx.aspect_mode, cx.show_info, cx.show_preferences, cx.prefs);
             });
 
             let subs_active = player.active_subtitle_track.is_some();
@@ -162,6 +174,13 @@ impl ControlsView {
             popup_above(&subs_resp).width(260.0).show(|ui| {
                 subtitles_menu(ui, player);
             });
+
+            if icon_button(ui, Icon::Camera, 36.0).on_hover_text("Take screenshot (Shift+S)").clicked() {
+                match player.take_screenshot(&cx.prefs.screenshot_dir, cx.prefs.screenshot_format) {
+                    Ok(path) => *cx.toast_msg = Some(format!("Screenshot saved: {}", path.display())),
+                    Err(e) => *cx.toast_msg = Some(format!("Screenshot failed: {e}")),
+                }
+            }
 
             if (player.playback_speed - 1.0).abs() > 0.01 {
                 ui.label(
@@ -299,6 +318,8 @@ fn settings_menu(
     player: &mut MediaPlayer,
     aspect: &mut AspectRatioMode,
     show_info: &mut bool,
+    show_preferences: &mut bool,
+    prefs: &mut PreferencesState,
 ) {
     ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
 
@@ -366,10 +387,25 @@ fn settings_menu(
         }
     });
 
+    ui.add_space(6.0);
+    section_label(ui, "Screenshot format");
+    ui.horizontal_wrapped(|ui| {
+        for fmt in ScreenshotFormat::ALL {
+            if chip(ui, prefs.screenshot_format == fmt, &fmt.extension().to_uppercase()).clicked() {
+                prefs.screenshot_format = fmt;
+                prefs.save();
+            }
+        }
+    });
+
     ui.add_space(8.0);
     ui.separator();
     if option_row(ui, false, "Media information").clicked() {
         *show_info = true;
+        ui.close();
+    }
+    if option_row(ui, false, "Preferences…").clicked() {
+        *show_preferences = true;
         ui.close();
     }
 }

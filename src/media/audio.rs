@@ -15,6 +15,7 @@ pub struct AudioEngine {
     pub state: Arc<AudioSharedState>,
     worker_handle: Option<thread::JoinHandle<()>>,
     stop_worker: Arc<AtomicBool>,
+    current_child: Arc<Mutex<Option<Child>>>,
 }
 
 pub struct AudioSharedState {
@@ -107,6 +108,7 @@ impl AudioEngine {
             state,
             worker_handle: None,
             stop_worker: Arc::new(AtomicBool::new(false)),
+            current_child: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -117,13 +119,8 @@ impl AudioEngine {
         speed: f32,
         track_index: Option<usize>,
     ) {
-        self.stop_worker.store(true, Ordering::SeqCst);
-        self.state.is_playing.store(false, Ordering::SeqCst);
+        self.stop();
 
-        {
-            let mut buf = self.state.buffer.lock();
-            buf.clear();
-        }
         self.state.samples_played.store(0, Ordering::SeqCst);
         self.state
             .seek_offset_ms
@@ -133,12 +130,23 @@ impl AudioEngine {
         let stop_flag = Arc::new(AtomicBool::new(false));
         self.stop_worker = Arc::clone(&stop_flag);
         let shared = Arc::clone(&self.state);
+        let current_child = Arc::clone(&self.current_child);
 
         let sample_rate = self.state.sample_rate;
         let channels = self.state.channels;
 
         let handle = thread::spawn(move || {
-            run_audio_decoder(path, seek_secs, speed, track_index, sample_rate, channels, shared, stop_flag);
+            run_audio_decoder(
+                path,
+                seek_secs,
+                speed,
+                track_index,
+                sample_rate,
+                channels,
+                shared,
+                stop_flag,
+                current_child,
+            );
         });
 
         self.worker_handle = Some(handle);
@@ -211,6 +219,13 @@ impl AudioEngine {
 
     pub fn stop(&mut self) {
         self.stop_worker.store(true, Ordering::SeqCst);
+        if let Some(mut c) = self.current_child.lock().take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+        if let Some(h) = self.worker_handle.take() {
+            let _ = h.join();
+        }
         self.state.is_playing.store(false, Ordering::SeqCst);
         let mut buf = self.state.buffer.lock();
         buf.clear();
@@ -273,6 +288,7 @@ fn run_audio_decoder(
     channels: u16,
     state: Arc<AudioSharedState>,
     stop_flag: Arc<AtomicBool>,
+    current_child: Arc<Mutex<Option<Child>>>,
 ) {
     let mut cmd = create_hidden_command("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error"]);
@@ -322,12 +338,13 @@ fn run_audio_decoder(
         None => return,
     };
 
+    *current_child.lock() = Some(child);
+
     let mut chunk = [0u8; 8192];
     let max_buffer_samples = (sample_rate as usize * 4) * channels as usize;
 
     loop {
         if stop_flag.load(Ordering::SeqCst) {
-            let _ = child.kill();
             break;
         }
 
@@ -366,6 +383,8 @@ fn run_audio_decoder(
         }
     }
 
-    let _ = child.kill();
-    let _ = child.wait();
+    if let Some(mut c) = current_child.lock().take() {
+        let _ = c.kill();
+        let _ = c.wait();
+    }
 }

@@ -52,6 +52,7 @@ impl AirMediaApp {
     pub fn new() -> Self {
         let codec_state = CodecDialogState::default();
         let show_codecs = !codec_state.status.is_ready();
+        let preferences_state = PreferencesState::load();
         Self {
             player: MediaPlayer::new(),
             playlist: Playlist::new(),
@@ -66,7 +67,7 @@ impl AirMediaApp {
             show_codecs,
             codec_state,
             equalizer_state: EqualizerState::default(),
-            preferences_state: PreferencesState::default(),
+            preferences_state,
             recent_files: Vec::new(),
             stream_url_input: String::new(),
             is_fullscreen: false,
@@ -118,11 +119,14 @@ impl AirMediaApp {
             self.set_toast("Stopped");
         }
 
-        // Shift+S: Take Snapshot
+        // Shift+S: Take Screenshot
         if input.modifiers.shift && input.key_pressed(Key::S) {
-            match self.player.take_snapshot() {
-                Ok(path) => self.set_toast(format!("Snapshot saved: {}", path.display())),
-                Err(e) => self.set_toast(format!("Snapshot failed: {e}")),
+            match self.player.take_screenshot(
+                &self.preferences_state.screenshot_dir,
+                self.preferences_state.screenshot_format,
+            ) {
+                Ok(path) => self.set_toast(format!("Screenshot saved: {}", path.display())),
+                Err(e) => self.set_toast(format!("Screenshot failed: {e}")),
             }
         }
 
@@ -343,6 +347,7 @@ impl eframe::App for AirMediaApp {
 
         if let Some(frame) = self.player.take_new_video_frame() {
             self.canvas.update_texture(&ctx, &frame);
+            ctx.request_repaint();
         }
 
         let current_pointer = ctx.input(|i| i.pointer.hover_pos());
@@ -485,11 +490,13 @@ impl eframe::App for AirMediaApp {
                                     show_codecs: &mut self.show_codecs,
                                     toggle_fullscreen: &mut toggle_fs,
                                     toast_msg: &mut menu_toast,
+                                    prefs: &self.preferences_state,
                                 },
                             );
                         });
 
                     if has_media {
+                        let mut controls_toast = None;
                         let hovering_controls = self.controls.show(
                             &mut overlay,
                             full_rect,
@@ -499,10 +506,16 @@ impl eframe::App for AirMediaApp {
                                 aspect_mode: &mut self.canvas.aspect_mode,
                                 show_playlist: &mut self.show_playlist,
                                 show_info: &mut self.show_info,
+                                show_preferences: &mut self.show_preferences,
                                 is_fullscreen: self.is_fullscreen,
                                 toggle_fullscreen: &mut toggle_fs,
+                                toast_msg: &mut controls_toast,
+                                prefs: &mut self.preferences_state,
                             },
                         );
+                        if let Some(t) = controls_toast {
+                            self.set_toast(t);
+                        }
                         if hovering_controls {
                             self.last_mouse_activity = Instant::now();
                         }
@@ -674,4 +687,3 @@ fn draw_drag_overlay(ui: &mut Ui, rect: Rect) {
         Theme::TEXT_MUTED,
     );
 }
-

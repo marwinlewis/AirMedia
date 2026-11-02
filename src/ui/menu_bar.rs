@@ -1,5 +1,6 @@
 use super::canvas::AspectRatioMode;
 use super::controls::{trim_speed, SPEEDS};
+use super::preferences_dialog::PreferencesState;
 use super::theme::Theme;
 use crate::media::MediaPlayer;
 use crate::playlist::Playlist;
@@ -26,6 +27,7 @@ pub struct MenuCtx<'a> {
     pub show_codecs: &'a mut bool,
     pub toggle_fullscreen: &'a mut bool,
     pub toast_msg: &'a mut Option<String>,
+    pub prefs: &'a PreferencesState,
 }
 
 fn item(ui: &mut Ui, label: &str, shortcut: &str) -> Response {
@@ -226,10 +228,10 @@ impl MenuBarView {
                     }
                 }
             });
-            if item(ui, "Take snapshot", "Shift+S").clicked() {
-                match player.take_snapshot() {
-                    Ok(p) => *cx.toast_msg = Some(format!("Snapshot saved: {}", p.display())),
-                    Err(e) => *cx.toast_msg = Some(format!("Snapshot failed: {e}")),
+            if item(ui, "Take screenshot", "Shift+S").clicked() {
+                match player.take_screenshot(&cx.prefs.screenshot_dir, cx.prefs.screenshot_format) {
+                    Ok(p) => *cx.toast_msg = Some(format!("Screenshot saved: {}", p.display())),
+                    Err(e) => *cx.toast_msg = Some(format!("Screenshot failed: {e}")),
                 }
                 ui.close();
             }

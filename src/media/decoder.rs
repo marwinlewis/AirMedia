@@ -84,7 +84,9 @@ pub struct VideoDecoder {
     is_paused: Arc<AtomicBool>,
     seek_target_ms: Arc<AtomicU64>,
     seek_requested: Arc<AtomicBool>,
+    step_one_frame: Arc<AtomicBool>,
     current_hw_accel: HwAccelMode,
+    current_child: Arc<Mutex<Option<Child>>>,
 }
 
 impl VideoDecoder {
@@ -97,7 +99,9 @@ impl VideoDecoder {
             is_paused: Arc::new(AtomicBool::new(false)),
             seek_target_ms: Arc::new(AtomicU64::new(0)),
             seek_requested: Arc::new(AtomicBool::new(false)),
+            step_one_frame: Arc::new(AtomicBool::new(false)),
             current_hw_accel: HwAccelMode::Auto,
+            current_child: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -117,6 +121,7 @@ impl VideoDecoder {
         self.current_hw_accel = hw_accel;
         self.stop_flag = Arc::new(AtomicBool::new(false));
         self.is_paused = Arc::new(AtomicBool::new(false));
+        self.step_one_frame = Arc::new(AtomicBool::new(false));
         self.frame_ready.store(false, Ordering::SeqCst);
 
         let shared_frame = Arc::clone(&self.shared_frame);
@@ -125,6 +130,8 @@ impl VideoDecoder {
         let is_paused = Arc::clone(&self.is_paused);
         let seek_target_ms = Arc::clone(&self.seek_target_ms);
         let seek_requested = Arc::clone(&self.seek_requested);
+        let step_one_frame = Arc::clone(&self.step_one_frame);
+        let current_child = Arc::clone(&self.current_child);
 
         let handle = thread::spawn(move || {
             run_video_worker(
@@ -141,11 +148,22 @@ impl VideoDecoder {
                 is_paused,
                 seek_target_ms,
                 seek_requested,
+                step_one_frame,
+                current_child,
                 audio_clock_fn,
             );
         });
 
         self.worker_handle = Some(handle);
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.worker_handle.is_some() && !self.stop_flag.load(Ordering::SeqCst)
+    }
+
+    pub fn step_forward(&self) {
+        self.is_paused.store(true, Ordering::SeqCst);
+        self.step_one_frame.store(true, Ordering::SeqCst);
     }
 
     pub fn take_new_frame(&self) -> Option<VideoFrame> {
@@ -185,6 +203,10 @@ impl VideoDecoder {
 
     pub fn stop(&mut self) {
         self.stop_flag.store(true, Ordering::SeqCst);
+        if let Some(mut child) = self.current_child.lock().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         if let Some(h) = self.worker_handle.take() {
             let _ = h.join();
         }
@@ -243,6 +265,8 @@ fn run_video_worker(
     is_paused: Arc<AtomicBool>,
     seek_target_ms: Arc<AtomicU64>,
     seek_requested: Arc<AtomicBool>,
+    step_one_frame: Arc<AtomicBool>,
+    current_child: Arc<Mutex<Option<Child>>>,
     audio_clock_fn: Option<Arc<dyn Fn() -> f64 + Send + Sync>>,
 ) {
     let frame_bytes = (width as usize) * (height as usize) * 4;
@@ -285,13 +309,19 @@ fn run_video_worker(
             }
         };
 
+        *current_child.lock() = Some(child);
+
         let mut frame_index = 0u64;
         let mut wall_clock_start = Instant::now();
         let wall_clock_seek_base = current_seek;
+        let mut first_frame = true;
 
         loop {
             if stop_flag.load(Ordering::SeqCst) {
-                let _ = child.kill();
+                if let Some(mut c) = current_child.lock().take() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
                 break 'restart_loop;
             }
 
@@ -299,16 +329,27 @@ fn run_video_worker(
             if seek_requested.swap(false, Ordering::SeqCst) {
                 let target_ms = seek_target_ms.load(Ordering::SeqCst);
                 current_seek = (target_ms as f64) / 1000.0;
-                let _ = child.kill();
-                let _ = child.wait();
+                if let Some(mut c) = current_child.lock().take() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
                 continue 'restart_loop;
             }
 
             // Pause handling
             if is_paused.load(Ordering::SeqCst) {
-                thread::sleep(Duration::from_millis(25));
-                wall_clock_start = Instant::now();
-                continue;
+                if first_frame {
+                    // Allow decoding the first frame at the seek/start location so it displays immediately
+                    first_frame = false;
+                } else if step_one_frame.swap(false, Ordering::SeqCst) {
+                    // Advance by exactly one frame!
+                } else {
+                    thread::sleep(Duration::from_millis(15));
+                    wall_clock_start = Instant::now();
+                    continue;
+                }
+            } else {
+                first_frame = false;
             }
 
             // Read exact frame buffer
@@ -318,7 +359,9 @@ fn run_video_worker(
                 match stdout.read(&mut buf[read_bytes..]) {
                     Ok(0) => {
                         // End of stream
-                        let _ = child.wait();
+                        if let Some(mut c) = current_child.lock().take() {
+                            let _ = c.wait();
+                        }
                         break 'restart_loop;
                     }
                     Ok(n) => {
@@ -326,7 +369,10 @@ fn run_video_worker(
                     }
                     Err(e) => {
                         eprintln!("Video pipe read error: {e}");
-                        let _ = child.kill();
+                        if let Some(mut c) = current_child.lock().take() {
+                            let _ = c.kill();
+                            let _ = c.wait();
+                        }
                         break 'restart_loop;
                     }
                 }
@@ -335,22 +381,24 @@ fn run_video_worker(
             let frame_pts = current_seek + (frame_index as f64) * frame_duration_secs;
             frame_index += 1;
 
-            // AV Sync Logic
-            let master_time = if let Some(ref audio_clock) = audio_clock_fn {
-                audio_clock()
-            } else {
-                wall_clock_seek_base + (wall_clock_start.elapsed().as_secs_f64() * speed as f64)
-            };
+            // AV Sync Logic (only active when playing normally, not when stepping frames or paused)
+            if !is_paused.load(Ordering::SeqCst) {
+                let master_time = if let Some(ref audio_clock) = audio_clock_fn {
+                    audio_clock()
+                } else {
+                    wall_clock_seek_base + (wall_clock_start.elapsed().as_secs_f64() * speed as f64)
+                };
 
-            let delta = frame_pts - master_time;
+                let delta = frame_pts - master_time;
 
-            if delta > 0.002 {
-                // Video is ahead of master clock -> wait
-                let sleep_ms = (delta * 1000.0).clamp(1.0, 100.0);
-                thread::sleep(Duration::from_millis(sleep_ms as u64));
-            } else if delta < -0.060 {
-                // Video is lagging behind master clock by >60ms -> skip frame display to catch up
-                continue;
+                if delta > 0.002 {
+                    // Video is ahead of master clock -> wait
+                    let sleep_ms = (delta * 1000.0).clamp(1.0, 100.0);
+                    thread::sleep(Duration::from_millis(sleep_ms as u64));
+                } else if delta < -0.060 {
+                    // Video is lagging behind master clock by >60ms -> skip frame display to catch up
+                    continue;
+                }
             }
 
             // Deliver frame to UI
@@ -365,5 +413,10 @@ fn run_video_worker(
             }
             frame_ready.store(true, Ordering::SeqCst);
         }
+    }
+
+    if let Some(mut c) = current_child.lock().take() {
+        let _ = c.kill();
+        let _ = c.wait();
     }
 }
