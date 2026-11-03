@@ -1,20 +1,15 @@
 use super::dialog::{footer_row, primary_button, secondary_button, show_dialog};
 use super::theme::Theme;
-use crate::media::MediaPlayer;
-use crate::playlist::Playlist;
+use crate::media::is_url;
 use eframe::egui::{self, RichText, Ui};
 use std::path::PathBuf;
 
 pub struct StreamDialog;
 
 impl StreamDialog {
-    pub fn show(
-        ui: &mut Ui,
-        player: &mut MediaPlayer,
-        playlist: &mut Playlist,
-        url_input: &mut String,
-        is_open: &mut bool,
-    ) {
+    /// Returns the URL to open when the user confirms a valid stream address.
+    pub fn show(ui: &mut Ui, url_input: &mut String, is_open: &mut bool) -> Option<PathBuf> {
+        let mut result = None;
         show_dialog(ui, "Open network stream", is_open, 440.0, |ui, close| {
             ui.label(RichText::new("HTTP(S), RTSP, RTMP or HLS (.m3u8) URL").color(Theme::TEXT_MUTED));
             ui.add_space(8.0);
@@ -25,7 +20,10 @@ impl StreamDialog {
                     .desired_width(f32::INFINITY)
                     .margin(egui::Margin::symmetric(10, 8)),
             );
-            text_resp.request_focus();
+            // Only grab focus when nothing else has it, so Tab can reach the buttons.
+            if ui.memory(|m| m.focused().is_none()) {
+                text_resp.request_focus();
+            }
 
             ui.add_space(16.0);
 
@@ -41,13 +39,19 @@ impl StreamDialog {
             });
 
             let url = url_input.trim();
-            if play && !url.is_empty() {
-                let path = PathBuf::from(url);
-                playlist.add(&path);
-                playlist.current_index = Some(playlist.items.len() - 1);
-                let _ = player.load_file(&path);
+            let valid = is_url(&PathBuf::from(url));
+            if !url.is_empty() && !valid {
+                ui.label(
+                    RichText::new("Enter a full URL including the scheme, e.g. https://")
+                        .size(12.0)
+                        .color(Theme::TEXT_FAINT),
+                );
+            }
+            if play && valid {
+                result = Some(PathBuf::from(url));
                 *close = true;
             }
         });
+        result
     }
 }

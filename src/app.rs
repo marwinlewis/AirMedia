@@ -1,16 +1,20 @@
+use crate::ab_loop::AbLoop;
 use crate::media::decoder::HwAccelMode;
-use crate::media::MediaPlayer;
-use crate::playlist::Playlist;
+use crate::media::{is_url, MediaPlayer};
+use crate::persistence::SessionState;
+use crate::playlist::{Playlist, RepeatMode};
 use crate::ui::about_dialog::AboutDialog;
 use crate::ui::codec_dialog::{CodecDialog, CodecDialogState};
 use crate::ui::canvas::{AspectRatioMode, VideoCanvas};
 use crate::ui::controls::{ControlsCtx, ControlsView};
-use crate::ui::equalizer_dialog::{EqualizerDialog, EqualizerState};
+use crate::ui::equalizer_dialog::EqualizerDialog;
 use crate::ui::info_dialog::InfoDialog;
+use crate::ui::jump_dialog::JumpDialog;
 use crate::ui::icons::Icon;
-use crate::ui::menu_bar::{MenuBarView, MenuCtx, MEDIA_EXTENSIONS};
+use crate::ui::menu_bar::{media_dialog, MenuBarView, MenuCtx, OpenRequest};
 use crate::ui::playlist_view::PlaylistView;
 use crate::ui::preferences_dialog::{PreferencesDialog, PreferencesState};
+use crate::ui::shortcuts_dialog::ShortcutsDialog;
 use crate::ui::stream_dialog::StreamDialog;
 use crate::ui::theme::Theme;
 use crate::ui::top_bar::TopBarView;
@@ -18,6 +22,11 @@ use crate::ui::top_bar::TopBarView;
 use eframe::egui::{self, Align2, Key, Popup, PopupCloseBehavior, Pos2, Rect, RichText, Stroke, Ui, Vec2};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+/// How often session state (playlist, resume positions, ...) is flushed to disk.
+const SESSION_SAVE_INTERVAL: Duration = Duration::from_secs(10);
+/// A pipeline that "finishes" this quickly after starting failed to play rather than ended.
+const MIN_PLAYBACK_BEFORE_ADVANCE: Duration = Duration::from_millis(500);
 
 pub struct AirMediaApp {
     pub player: MediaPlayer,
@@ -31,16 +40,27 @@ pub struct AirMediaApp {
     pub show_preferences: bool,
     pub show_about: bool,
     pub show_codecs: bool,
+    pub show_shortcuts: bool,
+    pub show_jump: bool,
+    pub jump_input: String,
+    pub ab_loop: AbLoop,
     pub codec_state: CodecDialogState,
-    pub equalizer_state: EqualizerState,
     pub preferences_state: PreferencesState,
-    pub recent_files: Vec<PathBuf>,
+    /// Recent files, playlist, equalizer and resume positions persisted across runs.
+    pub session: SessionState,
     pub stream_url_input: String,
     pub is_fullscreen: bool,
     pub last_mouse_activity: Instant,
     pub last_pointer_pos: Option<Pos2>,
-    pub toast: Option<(String, Instant)>,
+    /// Message, when it was shown, and how long it stays.
+    pub toast: Option<(String, Instant, f32)>,
     window_title: String,
+    /// File whose position is being tracked for resume, with its last known position/duration.
+    tracked: Option<(PathBuf, f64, f64)>,
+    last_session_save: Instant,
+    last_session_json: String,
+    /// Window level last sent to the OS, so the command is only sent on change.
+    applied_always_on_top: Option<bool>,
 }
 
 enum IdleAction {
@@ -53,9 +73,27 @@ impl AirMediaApp {
         let codec_state = CodecDialogState::default();
         let show_codecs = !codec_state.status.is_ready();
         let preferences_state = PreferencesState::load();
+        let session = SessionState::load();
+
+        let mut player = MediaPlayer::new();
+        player.hw_accel = preferences_state.hw_accel;
+        player.set_volume(preferences_state.default_volume);
+        player.audio_filter = session.equalizer.audio_filter();
+        player.video_filter = session.equalizer.video_filter();
+
+        // Restore the previous playlist (queued, not auto-played).
+        let mut playlist = Playlist::new();
+        for path in &session.playlist {
+            playlist.add(path);
+        }
+        playlist.current_index = session.playlist_index.filter(|i| *i < playlist.items.len());
+        playlist.repeat_mode = session.repeat_mode;
+        playlist.is_shuffle = session.shuffle;
+
+        let last_session_json = session.to_json();
         Self {
-            player: MediaPlayer::new(),
-            playlist: Playlist::new(),
+            player,
+            playlist,
             canvas: VideoCanvas::new(),
             controls: ControlsView::new(),
             show_playlist: false,
@@ -65,24 +103,261 @@ impl AirMediaApp {
             show_preferences: false,
             show_about: false,
             show_codecs,
+            show_shortcuts: false,
+            show_jump: false,
+            jump_input: String::new(),
+            ab_loop: AbLoop::default(),
             codec_state,
-            equalizer_state: EqualizerState::default(),
             preferences_state,
-            recent_files: Vec::new(),
+            session,
             stream_url_input: String::new(),
             is_fullscreen: false,
             last_mouse_activity: Instant::now(),
             last_pointer_pos: None,
             toast: None,
             window_title: String::new(),
+            tracked: None,
+            last_session_save: Instant::now(),
+            last_session_json,
+            applied_always_on_top: None,
         }
     }
 
     pub fn set_toast(&mut self, msg: impl Into<String>) {
-        self.toast = Some((msg.into(), Instant::now()));
+        self.toast = Some((msg.into(), Instant::now(), 1.4));
+    }
+
+    /// A toast that stays long enough to read an error message.
+    pub fn set_error_toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), Instant::now(), 4.0));
+    }
+
+    /// Expands files, folders, playlists and URLs, appends the media to the playlist and
+    /// optionally starts the first new item. Subtitle files attach to the current media.
+    pub fn open_paths(&mut self, inputs: Vec<PathBuf>, play: bool) {
+        if inputs.is_empty() {
+            return;
+        }
+        let collected = Playlist::collect_media(&inputs);
+        // Reuse entries already in the playlist (e.g. restored from the last session) instead
+        // of piling up duplicates every time the same file is opened again.
+        let mut first_target = None;
+        for path in &collected.media {
+            let idx = match self.playlist.items.iter().position(|i| &i.path == path) {
+                Some(existing) => existing,
+                None => {
+                    self.playlist.add(path);
+                    self.playlist.items.len() - 1
+                }
+            };
+            first_target.get_or_insert(idx);
+        }
+        let added = collected.media.len();
+
+        if let Some(first) = first_target.filter(|_| play || self.player.current_file.is_none()) {
+            self.play_index(first);
+            if added > 1 && self.player.current_file.is_some() {
+                self.set_toast(format!("Added {added} items to the playlist"));
+            }
+        } else if added > 0 {
+            self.set_toast(if added == 1 { "Added to playlist".to_string() } else { format!("Added {added} items to the playlist") });
+        }
+
+        for sub in collected.subtitles {
+            if self.player.current_file.is_none() {
+                self.set_toast("Open a video before loading subtitles");
+                break;
+            }
+            if self.player.load_external_subtitle(&sub).is_ok() {
+                self.set_toast("Subtitles loaded");
+            }
+        }
+
+        if added == 0 && self.toast.is_none() {
+            self.set_toast("No playable media found");
+        }
+    }
+
+    /// Loads playlist item `idx`. Errors surface through `player.take_error()`.
+    fn play_index(&mut self, idx: usize) {
+        let Some(path) = self.playlist.items.get(idx).map(|i| i.path.clone()) else { return };
+        self.playlist.current_index = Some(idx);
+        let _ = self.player.load_file(&path);
+    }
+
+    /// Records resume positions, applies a saved one when a new file starts, and keeps the
+    /// recent-files list in sync — regardless of which UI path loaded the file.
+    fn track_current_file(&mut self) {
+        let current = self.player.current_file.clone();
+        let changed = self.tracked.as_ref().map(|(p, _, _)| p) != current.as_ref();
+
+        if changed {
+            self.ab_loop.clear();
+            if let Some((old, pos, dur)) = self.tracked.take() {
+                if !is_url(&old) {
+                    self.session.record_position(&old, pos, dur);
+                }
+            }
+            if let Some(path) = &current {
+                self.session.push_recent(path);
+                if !is_url(path) {
+                    if let Some(pos) = self.session.resume_position(path) {
+                        if pos < self.player.duration_secs * crate::persistence::RESUME_MAX_FRACTION {
+                            self.player.seek(pos);
+                            self.set_toast(format!("Resumed at {}", format_clock(pos)));
+                        }
+                    }
+                }
+                self.tracked = Some((path.clone(), 0.0, self.player.duration_secs));
+            }
+        }
+
+        if let Some((_, pos, dur)) = &mut self.tracked {
+            *pos = self.player.current_time_secs();
+            *dur = self.player.duration_secs;
+        }
+    }
+
+    fn sync_session(&mut self) {
+        if let Some((path, pos, dur)) = &self.tracked {
+            if !is_url(path) {
+                let (path, pos, dur) = (path.clone(), *pos, *dur);
+                self.session.record_position(&path, pos, dur);
+            }
+        }
+        self.session.playlist = self.playlist.items.iter().map(|i| i.path.clone()).collect();
+        self.session.playlist_index = self.playlist.current_index;
+        self.session.repeat_mode = self.playlist.repeat_mode;
+        self.session.shuffle = self.playlist.is_shuffle;
+    }
+
+    /// Writes the session file if anything changed since the last write.
+    pub fn save_session(&mut self) {
+        self.sync_session();
+        let json = self.session.to_json();
+        if json != self.last_session_json {
+            SessionState::save_json(&json);
+            self.last_session_json = json;
+        }
+        self.last_session_save = Instant::now();
+    }
+
+    /// Moves on when the current item has played to the end.
+    fn handle_end_of_media(&mut self) {
+        if !self.player.is_playing || !self.player.is_finished() {
+            return;
+        }
+        if self.player.playback_started_at.elapsed() < MIN_PLAYBACK_BEFORE_ADVANCE {
+            // Ended immediately: the media can't be decoded. Don't spin through retries.
+            self.player.stop();
+            self.set_error_toast("Playback failed: the media could not be decoded");
+            return;
+        }
+        if let Some(a) = self.ab_loop.jump_target(self.player.duration_secs) {
+            // B at (or past) the end: loop back instead of advancing.
+            self.player.seek(a);
+            return;
+        }
+        if let Some((path, _, dur)) = &mut self.tracked {
+            // Played to the end: nothing to resume.
+            let path = path.clone();
+            let dur = *dur;
+            self.session.record_position(&path, dur, dur);
+            if let Some((_, pos, _)) = &mut self.tracked {
+                *pos = dur;
+            }
+        }
+        if self.playlist.repeat_mode == RepeatMode::One && self.playlist.current_item().is_some() {
+            self.player.seek(0.0);
+            return;
+        }
+        if let Some(next) = self.playlist.next_auto() {
+            let (path, title) = (next.path.clone(), next.title.clone());
+            if self.player.load_file(&path).is_ok() {
+                self.set_toast(format!("Playing: {title}"));
+            }
+        } else {
+            self.player.stop();
+        }
+    }
+
+    fn play_next(&mut self) {
+        if let Some(item) = self.playlist.next() {
+            let (path, title) = (item.path.clone(), item.title.clone());
+            if self.player.load_file(&path).is_ok() {
+                self.set_toast(format!("Next: {title}"));
+            }
+        }
+    }
+
+    fn play_prev(&mut self) {
+        if let Some(item) = self.playlist.prev() {
+            let (path, title) = (item.path.clone(), item.title.clone());
+            if self.player.load_file(&path).is_ok() {
+                self.set_toast(format!("Prev: {title}"));
+            }
+        }
+    }
+
+    fn toggle_play_with_toast(&mut self) {
+        self.player.toggle_play();
+        self.set_toast(if self.player.is_playing { "Playing" } else { "Paused" });
+    }
+
+    /// B: set A, then B, then clear.
+    fn cycle_ab_loop(&mut self) {
+        let t = self.player.current_time_secs();
+        if self.ab_loop.is_active() {
+            self.ab_loop.clear();
+            self.set_toast("A-B loop cleared");
+        } else if self.ab_loop.a.is_none() {
+            self.ab_loop.set_a(t);
+            self.set_toast(format!("Loop A: {}", format_clock(t)));
+        } else if self.ab_loop.set_b(t) {
+            let a = self.ab_loop.a.unwrap_or(0.0);
+            self.set_toast(format!("Loop A-B: {} - {}", format_clock(a), format_clock(t)));
+        } else {
+            self.set_toast("Loop B must be after A");
+        }
+    }
+
+    fn open_jump_dialog(&mut self) {
+        self.jump_input = format_clock(self.player.current_time_secs());
+        self.show_jump = true;
+    }
+
+    /// Hardware media keys (delivered while the window has focus).
+    fn handle_media_keys(&mut self, ctx: &egui::Context) {
+        let (play_pause, next, prev, stop) = ctx.input(|i| {
+            (
+                i.key_pressed(Key::MediaPlayPause),
+                i.key_pressed(Key::MediaTrackNext),
+                i.key_pressed(Key::MediaTrackPrevious),
+                i.key_pressed(Key::MediaStop),
+            )
+        });
+        let has_media = self.player.current_file.is_some();
+        if play_pause {
+            if has_media {
+                self.toggle_play_with_toast();
+            } else if let Some(idx) = self.playlist.current_index.or((!self.playlist.items.is_empty()).then_some(0)) {
+                self.play_index(idx);
+            }
+        }
+        if stop && has_media {
+            self.player.stop();
+            self.set_toast("Stopped");
+        }
+        if next {
+            self.play_next();
+        }
+        if prev {
+            self.play_prev();
+        }
     }
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        self.handle_media_keys(ctx);
         if ctx.egui_wants_keyboard_input() {
             return;
         }
@@ -91,6 +366,8 @@ impl AirMediaApp {
         if input.modifiers.ctrl && input.key_pressed(Key::Q) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+
+        let has_media = self.player.current_file.is_some();
 
         // Fullscreen toggle: F or F11
         if input.key_pressed(Key::F) || input.key_pressed(Key::F11) {
@@ -104,23 +381,18 @@ impl AirMediaApp {
         }
 
         // Space: Play / Pause
-        if input.key_pressed(Key::Space) {
-            self.player.toggle_play();
-            if self.player.is_playing {
-                self.set_toast("Playing");
-            } else {
-                self.set_toast("Paused");
-            }
+        if has_media && input.key_pressed(Key::Space) {
+            self.toggle_play_with_toast();
         }
 
         // S: Stop
-        if input.key_pressed(Key::S) && !input.modifiers.ctrl && !input.modifiers.shift {
+        if has_media && input.key_pressed(Key::S) && !input.modifiers.ctrl && !input.modifiers.shift {
             self.player.stop();
             self.set_toast("Stopped");
         }
 
         // Shift+S: Take Screenshot
-        if input.modifiers.shift && input.key_pressed(Key::S) {
+        if has_media && input.modifiers.shift && input.key_pressed(Key::S) {
             match self.player.take_screenshot(
                 &self.preferences_state.screenshot_dir,
                 self.preferences_state.screenshot_format,
@@ -152,12 +424,12 @@ impl AirMediaApp {
             5.0
         };
 
-        if input.key_pressed(Key::ArrowLeft) {
+        if has_media && input.key_pressed(Key::ArrowLeft) {
             let cur = self.player.current_time_secs();
             self.player.seek(cur - seek_delta);
             self.set_toast(format!("− {seek_delta} s"));
         }
-        if input.key_pressed(Key::ArrowRight) {
+        if has_media && input.key_pressed(Key::ArrowRight) {
             let cur = self.player.current_time_secs();
             self.player.seek(cur + seek_delta);
             self.set_toast(format!("+ {seek_delta} s"));
@@ -180,47 +452,59 @@ impl AirMediaApp {
         }
 
         // Frame Stepping
-        if input.key_pressed(Key::Period) {
+        if has_media && input.key_pressed(Key::Period) {
             self.player.step_frame(true);
             self.set_toast("Next frame");
         }
-        if input.key_pressed(Key::Comma) {
+        if has_media && input.key_pressed(Key::Comma) {
             self.player.step_frame(false);
             self.set_toast("Previous frame");
         }
 
         // Speed: [ and ]
-        if input.key_pressed(Key::OpenBracket) {
+        if has_media && input.key_pressed(Key::OpenBracket) {
             let spd = (self.player.playback_speed - 0.25).max(0.25);
             self.player.set_speed(spd);
             self.set_toast(format!("Speed {spd}×"));
         }
-        if input.key_pressed(Key::CloseBracket) {
+        if has_media && input.key_pressed(Key::CloseBracket) {
             let spd = (self.player.playback_speed + 0.25).min(2.5);
             self.player.set_speed(spd);
             self.set_toast(format!("Speed {spd}×"));
         }
-        if input.key_pressed(Key::Backspace) || input.key_pressed(Key::Equals) {
+        if has_media && (input.key_pressed(Key::Backspace) || input.key_pressed(Key::Equals)) {
             self.player.set_speed(1.0);
             self.set_toast("Speed 1×");
         }
 
         // Playlist Next / Prev: N / P
         if input.key_pressed(Key::N) && !ctrl {
-            if let Some(item) = self.playlist.next() {
-                let path = item.path.clone();
-                let title = item.title.clone();
-                let _ = self.player.load_file(&path);
-                self.set_toast(format!("Next: {title}"));
-            }
+            self.play_next();
         }
         if input.key_pressed(Key::P) && !ctrl {
-            if let Some(item) = self.playlist.prev() {
-                let path = item.path.clone();
-                let title = item.title.clone();
-                let _ = self.player.load_file(&path);
-                self.set_toast(format!("Prev: {title}"));
-            }
+            self.play_prev();
+        }
+
+        // B: A-B loop (set A, set B, clear); Ctrl+G: jump to time
+        if has_media && !ctrl && input.key_pressed(Key::B) {
+            self.cycle_ab_loop();
+        }
+        if has_media && ctrl && input.key_pressed(Key::G) {
+            self.open_jump_dialog();
+        }
+
+        // ? / F1: keyboard shortcut help
+        if input.key_pressed(Key::Questionmark)
+            || (input.modifiers.shift && input.key_pressed(Key::Slash))
+            || input.key_pressed(Key::F1)
+        {
+            self.show_shortcuts = !self.show_shortcuts;
+        }
+
+        // Ctrl+T: always on top
+        if ctrl && input.key_pressed(Key::T) {
+            self.preferences_state.always_on_top = !self.preferences_state.always_on_top;
+            self.set_toast(if self.preferences_state.always_on_top { "Always on top" } else { "Always on top off" });
         }
 
         // Ctrl+L or L: Toggle playlist
@@ -248,15 +532,13 @@ impl AirMediaApp {
             self.show_preferences = !self.show_preferences;
         }
 
-        // Ctrl+O: Open file
-        if input.key_pressed(Key::O) && !ctrl {
-            self.open_file_dialog();
-        } else if input.modifiers.ctrl && input.key_pressed(Key::O) {
+        // O / Ctrl+O: Open file
+        if input.key_pressed(Key::O) {
             self.open_file_dialog();
         }
 
         // A: Cycle Aspect Ratio
-        if input.key_pressed(Key::A) {
+        if !ctrl && input.key_pressed(Key::A) {
             let next_mode = match self.canvas.aspect_mode {
                 AspectRatioMode::Fit => AspectRatioMode::Fill,
                 AspectRatioMode::Fill => AspectRatioMode::Force16_9,
@@ -271,7 +553,7 @@ impl AirMediaApp {
         }
 
         // H: Cycle Hardware Acceleration
-        if input.key_pressed(Key::H) {
+        if !ctrl && input.key_pressed(Key::H) {
             let next_hw = match self.player.hw_accel {
                 HwAccelMode::Auto => HwAccelMode::D3D11VA,
                 HwAccelMode::D3D11VA => HwAccelMode::D3D12VA,
@@ -287,45 +569,22 @@ impl AirMediaApp {
     }
 
     fn open_file_dialog(&mut self) {
-        if let Some(path) = crate::ui::FileDialog::new()
-            .add_filter("Media", &MEDIA_EXTENSIONS)
-            .pick_file()
-        {
-            self.playlist.add(&path);
-            self.playlist.current_index = Some(self.playlist.items.len() - 1);
-            let _ = self.player.load_file(&path);
-            if !self.recent_files.contains(&path) {
-                self.recent_files.push(path);
-            }
+        if let Some(path) = media_dialog().pick_file() {
+            self.open_paths(vec![path], true);
         }
     }
 
     fn handle_drag_and_drop(&mut self, ctx: &egui::Context) {
-        let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
-        if !dropped_files.is_empty() {
-            for f in dropped_files {
-                let path = f.path().to_path_buf();
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-
-                if Playlist::is_supported_subtitle_extension(&ext) {
-                    let _ = self.player.load_external_subtitle(&path);
-                    self.set_toast("Subtitles loaded");
-                } else {
-                    self.playlist.add(&path);
-                    self.playlist.current_index = Some(self.playlist.items.len() - 1);
-                    let _ = self.player.load_file(&path);
-                    if let Some(name) = path.file_name() {
-                        self.set_toast(format!("Loaded: {}", name.to_string_lossy()));
-                    }
-                    if !self.recent_files.contains(&path) {
-                        self.recent_files.push(path);
-                    }
-                }
-            }
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect()
+        });
+        if !dropped.is_empty() {
+            self.open_paths(dropped, true);
         }
     }
 
@@ -344,6 +603,16 @@ impl eframe::App for AirMediaApp {
 
         self.handle_shortcuts(&ctx);
         self.handle_drag_and_drop(&ctx);
+        self.player.poll_background();
+        if let Some(err) = self.player.take_error() {
+            self.set_error_toast(err);
+        }
+        self.track_current_file();
+        if self.preferences_state.hw_accel != self.player.hw_accel {
+            // Keep the decoder choice made via H / the settings chip for the next launch.
+            self.preferences_state.hw_accel = self.player.hw_accel;
+            self.preferences_state.save();
+        }
 
         if let Some(frame) = self.player.take_new_video_frame() {
             self.canvas.update_texture(&ctx, &frame);
@@ -372,18 +641,22 @@ impl eframe::App for AirMediaApp {
         let active_subtitle = self.player.get_active_subtitle_text();
         let visualizer_levels = self.player.get_visualizer();
 
-        if self.player.is_playing && self.player.duration_secs > 0.5 {
-            let cur = self.player.current_time_secs();
-            if cur >= self.player.duration_secs - 0.25 {
-                if let Some(next_item) = self.playlist.next() {
-                    let path = next_item.path.clone();
-                    let title = next_item.title.clone();
-                    let _ = self.player.load_file(&path);
-                    self.set_toast(format!("Playing: {title}"));
-                } else {
-                    self.player.stop();
-                }
+        self.handle_end_of_media();
+        if self.player.is_playing && !self.controls.is_seeking {
+            let t = self.player.current_time_secs();
+            if let Some(a) = self.ab_loop.jump_target(t) {
+                self.player.seek(a);
             }
+        }
+
+        let on_top = self.preferences_state.always_on_top;
+        if self.applied_always_on_top != Some(on_top) {
+            let level = if on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
+            ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
+            if self.applied_always_on_top.is_some() {
+                self.preferences_state.save();
+            }
+            self.applied_always_on_top = Some(on_top);
         }
 
         let title = self
@@ -470,6 +743,9 @@ impl eframe::App for AirMediaApp {
                     let menu_resp = TopBarView::show(&mut overlay, full_rect, &self.player, &title);
                     let mut menu_toast = None;
                     let mut toggle_fs = false;
+                    let mut open_request: Option<OpenRequest> = None;
+                    let mut open_jump = false;
+                    let mut always_on_top = self.preferences_state.always_on_top;
                     Popup::menu(&menu_resp)
                         .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
                         .gap(6.0)
@@ -479,7 +755,8 @@ impl eframe::App for AirMediaApp {
                                 &mut self.player,
                                 &mut self.playlist,
                                 MenuCtx {
-                                    recent_files: &mut self.recent_files,
+                                    recent_files: &mut self.session.recent_files,
+                                    open_request: &mut open_request,
                                     aspect_mode: &mut self.canvas.aspect_mode,
                                     show_playlist: &mut self.show_playlist,
                                     show_info: &mut self.show_info,
@@ -488,6 +765,10 @@ impl eframe::App for AirMediaApp {
                                     show_preferences: &mut self.show_preferences,
                                     show_about: &mut self.show_about,
                                     show_codecs: &mut self.show_codecs,
+                                    show_shortcuts: &mut self.show_shortcuts,
+                                    open_jump: &mut open_jump,
+                                    ab_loop: &mut self.ab_loop,
+                                    always_on_top: &mut always_on_top,
                                     toggle_fullscreen: &mut toggle_fs,
                                     toast_msg: &mut menu_toast,
                                     prefs: &self.preferences_state,
@@ -511,6 +792,7 @@ impl eframe::App for AirMediaApp {
                                 toggle_fullscreen: &mut toggle_fs,
                                 toast_msg: &mut controls_toast,
                                 prefs: &mut self.preferences_state,
+                                ab_loop: self.ab_loop,
                             },
                         );
                         if let Some(t) = controls_toast {
@@ -524,16 +806,24 @@ impl eframe::App for AirMediaApp {
                     if let Some(t) = menu_toast {
                         self.set_toast(t);
                     }
+                    if let Some(req) = open_request {
+                        self.open_paths(req.paths, req.play);
+                    }
                     if toggle_fs {
                         self.toggle_fullscreen(&ctx);
                     }
+                    if open_jump {
+                        self.open_jump_dialog();
+                    }
+                    self.preferences_state.always_on_top = always_on_top;
                 }
 
                 // Toast HUD
-                if let Some((msg, time)) = &self.toast {
+                if let Some((msg, time, duration)) = &self.toast {
                     let elapsed = time.elapsed().as_secs_f32();
-                    if elapsed < 1.4 {
-                        let alpha = (1.0 - (elapsed - 1.0).max(0.0) / 0.4).clamp(0.0, 1.0);
+                    if elapsed < *duration {
+                        let fade_start = duration - 0.4;
+                        let alpha = (1.0 - (elapsed - fade_start).max(0.0) / 0.4).clamp(0.0, 1.0);
                         let pos = Pos2::new(full_rect.center().x, full_rect.min.y + 72.0);
                         draw_toast_hud(ui, pos, msg, alpha);
                     } else {
@@ -554,17 +844,31 @@ impl eframe::App for AirMediaApp {
 
         // Dialogs
         InfoDialog::show(ui, &self.player, &mut self.show_info);
-        EqualizerDialog::show(ui, &mut self.equalizer_state, &mut self.show_equalizer);
-        StreamDialog::show(
-            ui,
-            &mut self.player,
-            &mut self.playlist,
-            &mut self.stream_url_input,
-            &mut self.show_stream,
-        );
+        let effects = EqualizerDialog::show(ui, &mut self.session.equalizer, &mut self.show_equalizer);
+        if effects.audio {
+            self.player.set_audio_filter(self.session.equalizer.audio_filter());
+        }
+        if effects.video {
+            self.player.set_video_filter(self.session.equalizer.video_filter());
+        }
+        if let Some(url) = StreamDialog::show(ui, &mut self.stream_url_input, &mut self.show_stream) {
+            self.open_paths(vec![url], true);
+        }
         PreferencesDialog::show(ui, &mut self.player, &mut self.preferences_state, &mut self.show_preferences);
         AboutDialog::show(ui, &mut self.show_about);
+        ShortcutsDialog::show(ui, &mut self.show_shortcuts);
+        let duration = self.player.duration_secs;
+        if let Some(t) = JumpDialog::show(ui, &mut self.jump_input, &mut self.show_jump, duration) {
+            self.player.seek(t);
+            self.set_toast(format!("Jumped to {}", format_clock(t)));
+        }
         CodecDialog::show(ui, &mut self.codec_state, &mut self.show_codecs);
+
+        if self.last_session_save.elapsed() >= SESSION_SAVE_INTERVAL
+            || ctx.input(|i| i.viewport().close_requested())
+        {
+            self.save_session();
+        }
 
         if self.player.is_playing || self.toast.is_some() || self.codec_state.downloader.is_busy() {
             ctx.request_repaint();
@@ -572,6 +876,22 @@ impl eframe::App for AirMediaApp {
             // Keep the auto-hide timer and fades ticking without spinning the CPU.
             ctx.request_repaint_after(Duration::from_millis(250));
         }
+    }
+}
+
+impl Drop for AirMediaApp {
+    fn drop(&mut self) {
+        self.save_session();
+    }
+}
+
+fn format_clock(secs: f64) -> String {
+    let total = secs.max(0.0) as u64;
+    let (h, m, s) = (total / 3600, (total / 60) % 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
     }
 }
 
@@ -622,7 +942,8 @@ fn draw_empty_state(ui: &mut Ui, area: Rect) -> Option<IdleAction> {
 
     col.add_space(26.0);
     let mut job = egui::text::LayoutJob::default();
-    for (i, (key, what)) in [("O", "open"), ("L", "playlist"), ("F", "fullscreen")].iter().enumerate() {
+    for (i, (keys, what)) in crate::shortcuts::hints().enumerate() {
+        let key = keys.split(" or ").next().unwrap_or(keys);
         if i > 0 {
             job.append("      ", 0.0, egui::TextFormat::default());
         }

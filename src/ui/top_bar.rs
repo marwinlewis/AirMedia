@@ -33,7 +33,7 @@ impl TopBarView {
                     details.push(format!("{fps:.0} fps"));
                 }
             }
-            details.push(player.hw_accel.short_name().to_string());
+            details.push(player.effective_hw_accel().short_name().to_string());
         }
 
         row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

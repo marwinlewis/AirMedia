@@ -1,4 +1,4 @@
-use super::create_hidden_command;
+use super::{create_hidden_command, ffmpeg_input_args};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 use parking_lot::Mutex;
@@ -31,6 +31,8 @@ pub struct AudioSharedState {
     pub visualizer_levels: Mutex<[f32; 16]>,
     pub delay_ms: AtomicU64,
     pub delay_sign: AtomicBool,
+    /// Set when the decoder process reached end of stream (or failed to start).
+    pub decoder_finished: AtomicBool,
 }
 
 impl AudioEngine {
@@ -66,6 +68,7 @@ impl AudioEngine {
             visualizer_levels: Mutex::new([0.0; 16]),
             delay_ms: AtomicU64::new(0),
             delay_sign: AtomicBool::new(true),
+            decoder_finished: AtomicBool::new(false),
         });
 
         let state_cb = Arc::clone(&state);
@@ -118,9 +121,11 @@ impl AudioEngine {
         seek_secs: f64,
         speed: f32,
         track_index: Option<usize>,
+        audio_filter: Option<String>,
     ) {
         self.stop();
 
+        self.state.decoder_finished.store(false, Ordering::SeqCst);
         self.state.samples_played.store(0, Ordering::SeqCst);
         self.state
             .seek_offset_ms
@@ -141,6 +146,7 @@ impl AudioEngine {
                 seek_secs,
                 speed,
                 track_index,
+                audio_filter,
                 sample_rate,
                 channels,
                 shared,
@@ -163,6 +169,11 @@ impl AudioEngine {
 
     pub fn is_playing(&self) -> bool {
         self.state.is_playing.load(Ordering::SeqCst)
+    }
+
+    /// True once the decoder hit end of stream and every buffered sample has been played.
+    pub fn is_drained(&self) -> bool {
+        self.state.decoder_finished.load(Ordering::SeqCst) && self.state.buffer.lock().is_empty()
     }
 
     pub fn set_volume(&self, vol: f32) {
@@ -284,11 +295,62 @@ fn run_audio_decoder(
     seek_secs: f64,
     speed: f32,
     track_index: Option<usize>,
+    audio_filter: Option<String>,
     sample_rate: u32,
     channels: u16,
     state: Arc<AudioSharedState>,
     stop_flag: Arc<AtomicBool>,
     current_child: Arc<Mutex<Option<Child>>>,
+) {
+    decode_audio(
+        path,
+        seek_secs,
+        speed,
+        track_index,
+        audio_filter,
+        sample_rate,
+        channels,
+        &state,
+        &stop_flag,
+        &current_child,
+    );
+    if !stop_flag.load(Ordering::SeqCst) {
+        state.decoder_finished.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Builds an `atempo` chain for `speed`. A single atempo instance only accepts 0.5–2.0 on
+/// older ffmpeg builds, so out-of-range speeds are split into several stages.
+pub fn atempo_chain(speed: f32) -> Option<String> {
+    if (speed - 1.0).abs() <= 0.02 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut remaining = speed as f64;
+    while remaining < 0.5 {
+        parts.push("atempo=0.5".to_string());
+        remaining /= 0.5;
+    }
+    while remaining > 2.0 {
+        parts.push("atempo=2.0".to_string());
+        remaining /= 2.0;
+    }
+    parts.push(format!("atempo={remaining:.4}"));
+    Some(parts.join(","))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_audio(
+    path: PathBuf,
+    seek_secs: f64,
+    speed: f32,
+    track_index: Option<usize>,
+    audio_filter: Option<String>,
+    sample_rate: u32,
+    channels: u16,
+    state: &Arc<AudioSharedState>,
+    stop_flag: &Arc<AtomicBool>,
+    current_child: &Arc<Mutex<Option<Child>>>,
 ) {
     let mut cmd = create_hidden_command("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error"]);
@@ -297,8 +359,7 @@ fn run_audio_decoder(
         cmd.args(["-ss", &format!("{seek_secs:.3}")]);
     }
 
-    let path_str = path.to_string_lossy().to_string();
-    cmd.args(["-i", &path_str]);
+    cmd.args(ffmpeg_input_args(&path));
 
     if let Some(track) = track_index {
         cmd.args(["-map", &format!("0:a:{track}")]);
@@ -306,8 +367,9 @@ fn run_audio_decoder(
         cmd.args(["-map", "0:a:0?"]);
     }
 
-    if (speed - 1.0).abs() > 0.02 {
-        cmd.args(["-filter:a", &format!("atempo={speed:.3}")]);
+    let filters: Vec<String> = [audio_filter, atempo_chain(speed)].into_iter().flatten().collect();
+    if !filters.is_empty() {
+        cmd.args(["-filter:a", &filters.join(",")]);
     }
 
     cmd.args([
@@ -322,6 +384,7 @@ fn run_audio_decoder(
         "-",
     ]);
 
+    cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
 

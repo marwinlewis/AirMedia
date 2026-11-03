@@ -60,7 +60,7 @@ impl InfoDialog {
                     if let Some(b) = kbps(&v.bit_rate) {
                         video.push(("Bitrate", b));
                     }
-                    video.push(("Decoder", player.hw_accel.name().to_string()));
+                    video.push(("Decoder", player.effective_hw_accel().name().to_string()));
                     ui.add_space(12.0);
                     section_label(ui, "Video");
                     rows(ui, "info_video", &video);

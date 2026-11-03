@@ -1,7 +1,10 @@
+pub mod ab_loop;
 pub mod app;
 pub mod app_info;
 pub mod media;
+pub mod persistence;
 pub mod playlist;
+pub mod shortcuts;
 pub mod ui;
 
 #[cfg(target_os = "android")]

@@ -49,9 +49,14 @@ AirMedia uses a minimal, immersive interface: the video fills the window and all
    - **Settings** popup: playback speed, aspect ratio, audio track, audio delay, hardware decoder, media information.
    - Playlist and fullscreen toggles.
 4. **Playlist drawer**: slides in from the right with search, shuffle, repeat (all / one), clear, and a now-playing indicator.
-5. **Dialogs**: Effects (10-band equalizer with presets and preamp, video color adjustments), Media information,
+   Playlists (`.m3u`, `.m3u8`, `.pls`) can be imported and saved from the app menu; folders are added in natural filename order.
+5. **Session memory**: the playlist, recent files, equalizer settings and the playback position of each file are restored on
+   the next launch (files resume where you stopped if you were more than 30 s in and not near the end).
+6. **Subtitles**: sidecar files (`movie.srt`, `movie.en.srt`, `.vtt`, `.ass`) load automatically; embedded text tracks are
+   extracted in the background. UTF-8, UTF-16 and legacy Windows-1252 files are supported.
+7. **Dialogs**: Effects (10-band equalizer with presets and preamp, video color adjustments), Media information,
    Codec Engine Setup, Preferences, Open network stream, and About — all sharing one consistent dark style.
-6. **Auto-hide**: controls and the cursor hide after a configurable idle time while playing.
+8. **Auto-hide**: controls and the cursor hide after a configurable idle time while playing.
 
 ---
 
@@ -61,25 +66,40 @@ AirMedia uses a minimal, immersive interface: the video fills the window and all
 |---|---|
 | `Space` | Play / Pause |
 | `S` | Stop playback |
-| `F` or `F11` | Toggle Fullscreen |
-| `Esc` | Exit Fullscreen |
-| `Left` / `Right` | Seek backward / forward 5s |
-| `Shift + Left` / `Right` | Seek backward / forward 15s |
-| `Ctrl + Left` / `Right` | Seek backward / forward 60s |
-| `Up` / `Down` | Volume Up / Down (5%) |
-| `M` | Mute / Unmute |
+| `N / P` | Next / Previous track in playlist |
+| `Media keys` | Play/Pause, Stop, Next and Previous track |
 | `.` | Step 1 frame forward |
 | `,` | Step 1 frame backward |
-| `[` / `]` | Decrease / Increase playback speed (0.25x steps) |
+| `[ / ]` | Decrease / Increase playback speed (0.25x steps) |
 | `Backspace` or `=` | Reset playback speed to 1.0x |
-| `N` / `P` | Next / Previous track in playlist |
-| `A` | Cycle Aspect Ratio (Fit ➔ Fill ➔ 16:9 ➔ 4:3 ➔ 21:9 ➔ Original) |
-| `H` | Cycle Hardware Acceleration (Auto ➔ D3D11VA ➔ D3D12VA ➔ CUDA ➔ Vulkan ➔ CPU) |
-| `O` | Open media file dialog |
-| `L` | Toggle Playlist drawer |
-| `I` | Toggle Codec & Media Information dialog |
-| `Mouse Wheel` | Scroll anywhere on player window to adjust volume |
-| `Double Click` | Toggle Fullscreen |
+| `Left / Right` | Seek backward / forward 5s |
+| `Shift + Left / Right` | Seek backward / forward 15s |
+| `Ctrl + Left / Right` | Seek backward / forward 60s |
+| `Ctrl + G` | Jump to time |
+| `B` | A-B loop: set A, then B, then clear |
+| `Up / Down` | Volume up / down (5%) |
+| `M` | Mute / Unmute |
+| `Mouse wheel` | Adjust volume over the video |
+| `Ctrl + E` | Equalizer & video filters |
+| `A` | Cycle aspect ratio (Fit, Fill, 16:9, 4:3, 21:9, Original) |
+| `H` | Cycle hardware acceleration (Auto, D3D11VA, D3D12VA, CUDA, Vulkan, CPU) |
+| `Shift + S` | Take screenshot |
+| `L` | Toggle playlist drawer |
+| `Delete` | Remove selected playlist items |
+| `Ctrl / Shift + Click` | Select several playlist items |
+| `Drag` | Reorder playlist items |
+| `O` | Open media file |
+| `Ctrl + N` | Open network stream |
+| `F` or `F11` | Toggle fullscreen |
+| `Double click` | Toggle fullscreen |
+| `Esc` | Exit fullscreen / close dialog |
+| `Ctrl + T` | Toggle always on top |
+| `I` | Media information |
+| `Ctrl + P` | Preferences |
+| `?` or `F1` | Show keyboard shortcuts |
+| `Ctrl + Q` | Quit |
+
+Press `?` or `F1` in the player for the same list. The table is generated from `src/shortcuts.rs`; `cargo test` fails if it drifts. Hardware media keys work while the AirMedia window has focus.
 
 ---
 
@@ -112,6 +132,13 @@ AirMedia keeps its distribution package exceptionally lightweight (**~12.5 MB to
 1. **Preinstalled Detection**: When launched or installed, AirMedia checks if FFmpeg and FFprobe are already installed on the system (PATH, Conda, Chocolatey, Winget, etc.). If found, it uses them directly with **zero downloads needed**.
 2. **On-The-Fly Installation**: If codecs are not found, either the installer script (`install.bat` / `install.ps1`) or the in-app Codec Setup modal will automatically download the official minimal release essentials package on the fly into `%LOCALAPPDATA%\AirMedia\bin`.
 3. **Manual Installation**: You can also install codecs globally anytime with `winget install Gyan.FFmpeg` or `choco install ffmpeg`.
+4. **Portable bundles**: to ship codecs with a portable build, put `ffmpeg`/`ffprobe` in a `codecs` folder next to the
+   executable. Binaries placed directly beside `airmedia.exe` are ignored on purpose, so a stray `ffmpeg.exe` dropped into
+   e.g. your Downloads folder can never be executed by AirMedia.
+
+The in-app downloader verifies the archive against the SHA-256 checksum published by gyan.dev before installing it.
+Media is opened with an ffmpeg protocol whitelist: local files can only read local files, and network streams cannot read
+local files.
 
 ---
 
@@ -165,6 +192,9 @@ chmod +x scripts/build_macos.sh
 - SHA-256 checksum files for each package
 
 ### Android Production Build (Mobile APK)
+
+> **Known limitation:** playback currently relies on external `ffmpeg`/`ffprobe` executables, which are not available on
+> Android. The APK builds and launches, but cannot play media yet.
 
 AirMedia runs directly on Android via `android.app.NativeActivity` with zero Java boilerplate overhead, leveraging Vulkan GPU presentation and NDK hardware decoding.
 

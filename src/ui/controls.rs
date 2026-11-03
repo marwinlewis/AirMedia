@@ -30,6 +30,8 @@ pub struct ControlsCtx<'a> {
     pub toggle_fullscreen: &'a mut bool,
     pub toast_msg: &'a mut Option<String>,
     pub prefs: &'a mut PreferencesState,
+    /// A-B loop points, drawn as markers on the seek bar.
+    pub ab_loop: crate::ab_loop::AbLoop,
 }
 
 impl ControlsView {
@@ -68,7 +70,7 @@ impl ControlsView {
         let dur = player.duration_secs;
 
         let mut seek_ui = ui.new_child(egui::UiBuilder::new().max_rect(seek_rect));
-        self.seek_bar(&mut seek_ui, cur_time, dur, player);
+        self.seek_bar(&mut seek_ui, cur_time, dur, player, cx.ab_loop);
 
         let mut row = ui.new_child(
             egui::UiBuilder::new()
@@ -199,7 +201,7 @@ impl ControlsView {
         hovered || self.is_seeking
     }
 
-    fn seek_bar(&mut self, ui: &mut Ui, cur_time: f64, total: f64, player: &mut MediaPlayer) {
+    fn seek_bar(&mut self, ui: &mut Ui, cur_time: f64, total: f64, player: &mut MediaPlayer, ab: crate::ab_loop::AbLoop) {
         let rect = ui.max_rect();
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter();
@@ -239,6 +241,22 @@ impl ControlsView {
         }
         let fill = Rect::from_min_max(rail.min, Pos2::new(rail.min.x + rail.width() * progress, rail.max.y));
         painter.rect_filled(fill, r, Theme::ACCENT);
+
+        // A-B loop: shaded span plus a tick at each point.
+        if total > 0.0 {
+            let x_at = |t: f64| rail.min.x + rail.width() * (t / total).clamp(0.0, 1.0) as f32;
+            if let (Some(a), Some(b)) = (ab.a, ab.b) {
+                let span = Rect::from_min_max(Pos2::new(x_at(a), rail.min.y - 2.0), Pos2::new(x_at(b), rail.max.y + 2.0));
+                painter.rect_filled(span, r, Theme::ACCENT_SOFT.gamma_multiply(0.35));
+            }
+            for p in [ab.a, ab.b].into_iter().flatten() {
+                let x = x_at(p);
+                painter.line_segment(
+                    [Pos2::new(x, rail.min.y - 5.0), Pos2::new(x, rail.max.y + 5.0)],
+                    egui::Stroke::new(2.0, Theme::ACCENT_SOFT),
+                );
+            }
+        }
 
         if t > 0.0 {
             let knob = Pos2::new(fill.max.x, rail.center().y);
@@ -431,7 +449,7 @@ fn subtitles_menu(ui: &mut Ui, player: &mut MediaPlayer) {
     ui.add_space(2.0);
     if option_row(ui, false, "Load subtitle file…").clicked() {
         if let Some(path) = crate::ui::FileDialog::new()
-            .add_filter("Subtitles", &["srt", "vtt", "ass"])
+            .add_filter("Subtitles", &crate::media::subtitle::SUBTITLE_EXTENSIONS)
             .pick_file()
         {
             let _ = player.load_external_subtitle(path);

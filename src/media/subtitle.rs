@@ -1,6 +1,73 @@
-use super::create_hidden_command;
+use super::{create_hidden_command, ffmpeg_input_args, is_url, output_with_timeout};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// External subtitle files larger than this are rejected rather than read into memory.
+pub const MAX_SUBTITLE_FILE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Subtitle file extensions the player can load.
+pub const SUBTITLE_EXTENSIONS: [&str; 4] = ["srt", "vtt", "ass", "ssa"];
+
+/// Image-based subtitle codecs that cannot be converted to text cues.
+pub fn is_bitmap_subtitle_codec(codec: Option<&str>) -> bool {
+    matches!(
+        codec,
+        Some("hdmv_pgs_subtitle" | "dvd_subtitle" | "dvb_subtitle" | "xsub" | "dvb_teletext")
+    )
+}
+
+/// Decodes subtitle bytes: UTF-8 (with or without BOM), UTF-16 with BOM, otherwise
+/// Windows-1252/Latin-1 (the usual encoding of legacy .srt files).
+pub fn decode_subtitle_bytes(bytes: &[u8]) -> String {
+    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(rest).into_owned();
+    }
+    if bytes.len() >= 2 && (bytes[..2] == [0xFF, 0xFE] || bytes[..2] == [0xFE, 0xFF]) {
+        let le = bytes[0] == 0xFF;
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) })
+            .collect();
+        return String::from_utf16_lossy(&units);
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_owned(),
+        Err(_) => bytes.iter().map(|&b| b as char).collect(),
+    }
+}
+
+/// Finds subtitle files next to a local media file that share its name, e.g. `movie.srt`
+/// and `movie.en.srt` for `movie.mkv`. Sorted so the exact-name match comes first.
+pub fn find_sidecar_subtitles(media: &Path) -> Vec<PathBuf> {
+    if is_url(media) {
+        return Vec::new();
+    }
+    let (Some(dir), Some(stem)) = (media.parent(), media.file_stem().and_then(|s| s.to_str())) else {
+        return Vec::new();
+    };
+    let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+    let stem_lower = stem.to_lowercase();
+
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            let ext_ok = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| SUBTITLE_EXTENSIONS.contains(&e.to_lowercase().as_str()));
+            let name_ok = p.file_stem().and_then(|s| s.to_str()).is_some_and(|s| {
+                let s = s.to_lowercase();
+                s == stem_lower || s.starts_with(&format!("{stem_lower}."))
+            });
+            ext_ok && name_ok && p.is_file()
+        })
+        .collect();
+    found.sort_by_key(|p| (p.file_stem().map(|s| s.len()).unwrap_or(0), p.clone()));
+    found
+}
 
 #[derive(Debug, Clone)]
 pub struct SubtitleCue {
@@ -21,14 +88,27 @@ pub struct SubtitleTrack {
 impl SubtitleTrack {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let path_ref = path.as_ref();
-        let content = fs::read_to_string(path_ref)
-            .map_err(|e| format!("Failed to read subtitle file: {e}"))?;
+        let size = fs::metadata(path_ref)
+            .map_err(|e| format!("Failed to read subtitle file: {e}"))?
+            .len();
+        if size > MAX_SUBTITLE_FILE_BYTES {
+            return Err(format!("Subtitle file is too large ({} MB)", size / (1024 * 1024)));
+        }
 
-        let cues = if path_ref.extension().map_or(false, |ext| ext == "vtt") {
-            parse_vtt(&content)
-        } else {
-            parse_srt(&content)
+        let ext = path_ref
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let cues = match ext.as_str() {
+            "vtt" => parse_vtt(&decode_subtitle_bytes(&read_file(path_ref)?)),
+            // Styled formats are flattened to SRT by ffmpeg.
+            "ass" | "ssa" => parse_srt(&convert_to_srt(path_ref, None)?),
+            _ => parse_srt(&decode_subtitle_bytes(&read_file(path_ref)?)),
         };
+        if cues.is_empty() {
+            return Err("No subtitle cues found in file".to_string());
+        }
 
         let filename = path_ref
             .file_name()
@@ -50,29 +130,7 @@ impl SubtitleTrack {
         name: String,
         lang: String,
     ) -> Result<Self, String> {
-        let path_str = media_path.as_ref().to_string_lossy().to_string();
-        let map_arg = format!("0:{stream_index}");
-
-        let output = create_hidden_command("ffmpeg")
-            .args([
-                "-v",
-                "quiet",
-                "-i",
-                &path_str,
-                "-map",
-                &map_arg,
-                "-f",
-                "srt",
-                "-",
-            ])
-            .output()
-            .map_err(|e| format!("Failed to extract embedded subtitle: {e}"))?;
-
-        if !output.status.success() {
-            return Err("Embedded subtitle extraction failed".into());
-        }
-
-        let srt_text = String::from_utf8_lossy(&output.stdout);
+        let srt_text = convert_to_srt(media_path.as_ref(), Some(stream_index))?;
         let cues = parse_srt(&srt_text);
 
         Ok(SubtitleTrack {
@@ -101,6 +159,27 @@ impl SubtitleTrack {
             Some(active.join("\n"))
         }
     }
+}
+
+fn read_file(path: &Path) -> Result<Vec<u8>, String> {
+    fs::read(path).map_err(|e| format!("Failed to read subtitle file: {e}"))
+}
+
+/// Uses ffmpeg to convert a subtitle stream (or a whole .ass/.ssa file) to SRT text.
+fn convert_to_srt(input: &Path, stream_index: Option<usize>) -> Result<String, String> {
+    let mut cmd = create_hidden_command("ffmpeg");
+    cmd.args(["-v", "error"]);
+    cmd.args(ffmpeg_input_args(input));
+    let map_arg = format!("0:{}", stream_index.unwrap_or(0));
+    let map = if stream_index.is_some() { map_arg.as_str() } else { "0:s:0" };
+    cmd.args(["-map", map, "-f", "srt", "-"]);
+
+    let output = output_with_timeout(cmd, Duration::from_secs(120))
+        .map_err(|e| format!("Failed to extract subtitles: {e}"))?;
+    if !output.status.success() {
+        return Err("Subtitle extraction failed".into());
+    }
+    Ok(decode_subtitle_bytes(&output.stdout))
 }
 
 pub fn parse_srt(content: &str) -> Vec<SubtitleCue> {
@@ -204,13 +283,18 @@ fn parse_timestamp(s: &str) -> Option<u64> {
         let sec_parts: Vec<&str> = parts[2].split('.').collect();
         let seconds: u64 = sec_parts[0].parse().ok()?;
         let millis: u64 = if sec_parts.len() > 1 {
-            let m_str = format!("{:0<3}", sec_parts[1]);
-            m_str[..3.min(m_str.len())].parse().unwrap_or(0)
+            // Char-based so non-ASCII junk in a crafted file can't split a UTF-8 sequence.
+            let digits: String = sec_parts[1].chars().take(3).collect();
+            format!("{digits:0<3}").parse().unwrap_or(0)
         } else {
             0
         };
 
-        Some(hours * 3600_000 + minutes * 60_000 + seconds * 1_000 + millis)
+        hours
+            .checked_mul(3_600_000)?
+            .checked_add(minutes.checked_mul(60_000)?)?
+            .checked_add(seconds.checked_mul(1_000)?)?
+            .checked_add(millis)
     } else if colon_count == 1 {
         // MM:SS.mmm
         let parts: Vec<&str> = s.split(':').collect();
@@ -218,13 +302,17 @@ fn parse_timestamp(s: &str) -> Option<u64> {
         let sec_parts: Vec<&str> = parts[1].split('.').collect();
         let seconds: u64 = sec_parts[0].parse().ok()?;
         let millis: u64 = if sec_parts.len() > 1 {
-            let m_str = format!("{:0<3}", sec_parts[1]);
-            m_str[..3.min(m_str.len())].parse().unwrap_or(0)
+            // Char-based so non-ASCII junk in a crafted file can't split a UTF-8 sequence.
+            let digits: String = sec_parts[1].chars().take(3).collect();
+            format!("{digits:0<3}").parse().unwrap_or(0)
         } else {
             0
         };
 
-        Some(minutes * 60_000 + seconds * 1_000 + millis)
+        minutes
+            .checked_mul(60_000)?
+            .checked_add(seconds.checked_mul(1_000)?)?
+            .checked_add(millis)
     } else {
         None
     }

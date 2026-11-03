@@ -9,7 +9,8 @@
     along with SHA-256 checksums. Supports automated Authenticode Code Signing when credentials are provided.
 
 .PARAMETER BundleFfmpeg
-    Explicitly bundles ffmpeg.exe and ffprobe.exe alongside airmedia.exe if requested.
+    Reserved: bundled ffmpeg.exe / ffprobe.exe must be staged in a "codecs" folder next to
+    airmedia.exe. AirMedia ignores codec binaries placed directly beside the executable.
     Default is $false to keep the build lightweight (~12 MB vs 400+ MB).
 
 .PARAMETER SkipTests

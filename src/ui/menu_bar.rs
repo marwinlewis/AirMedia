@@ -2,14 +2,25 @@ use super::canvas::AspectRatioMode;
 use super::controls::{trim_speed, SPEEDS};
 use super::preferences_dialog::PreferencesState;
 use super::theme::Theme;
+use crate::ab_loop::AbLoop;
 use crate::media::MediaPlayer;
 use crate::playlist::Playlist;
 use eframe::egui::{self, Response, RichText, Ui};
 use std::path::PathBuf;
 
-pub const MEDIA_EXTENSIONS: [&str; 14] = [
-    "mp4", "mkv", "avi", "webm", "mov", "flv", "wmv", "mp3", "flac", "wav", "aac", "ogg", "opus", "m4a",
+pub const MEDIA_EXTENSIONS: [&str; 26] = [
+    "mp4", "mkv", "avi", "webm", "mov", "flv", "wmv", "ts", "m2ts", "mts", "m4v", "mpg", "mpeg", "ogv", "3gp",
+    "mp3", "flac", "wav", "aac", "ogg", "opus", "m4a", "wma", "aiff", "mka", "wv",
 ];
+
+pub const PLAYLIST_EXTENSIONS: [&str; 3] = ["m3u", "m3u8", "pls"];
+
+/// Files/folders/URLs the user chose to open; the app expands and queues them.
+pub struct OpenRequest {
+    pub paths: Vec<PathBuf>,
+    /// Start playing the first new item (otherwise only queue it).
+    pub play: bool,
+}
 
 /// The app menu, shown as a popup from the top-left menu button. Each former menu-bar
 /// category is a submenu.
@@ -17,6 +28,7 @@ pub struct MenuBarView;
 
 pub struct MenuCtx<'a> {
     pub recent_files: &'a mut Vec<PathBuf>,
+    pub open_request: &'a mut Option<OpenRequest>,
     pub aspect_mode: &'a mut AspectRatioMode,
     pub show_playlist: &'a mut bool,
     pub show_info: &'a mut bool,
@@ -25,9 +37,23 @@ pub struct MenuCtx<'a> {
     pub show_preferences: &'a mut bool,
     pub show_about: &'a mut bool,
     pub show_codecs: &'a mut bool,
+    pub show_shortcuts: &'a mut bool,
+    pub open_jump: &'a mut bool,
+    pub ab_loop: &'a mut AbLoop,
+    pub always_on_top: &'a mut bool,
     pub toggle_fullscreen: &'a mut bool,
     pub toast_msg: &'a mut Option<String>,
     pub prefs: &'a PreferencesState,
+}
+
+/// File picker for media, also accepting playlists.
+pub fn media_dialog() -> crate::ui::FileDialog {
+    let mut all: Vec<&str> = MEDIA_EXTENSIONS.to_vec();
+    all.extend(PLAYLIST_EXTENSIONS);
+    crate::ui::FileDialog::new()
+        .add_filter("Media & playlists", &all)
+        .add_filter("Media", &MEDIA_EXTENSIONS)
+        .add_filter("Playlists", &PLAYLIST_EXTENSIONS)
 }
 
 fn item(ui: &mut Ui, label: &str, shortcut: &str) -> Response {
@@ -42,48 +68,24 @@ impl MenuBarView {
     pub fn show(ui: &mut Ui, player: &mut MediaPlayer, playlist: &mut Playlist, cx: MenuCtx<'_>) {
         ui.set_min_width(220.0);
 
+        let idle = player.current_file.is_none();
         if item(ui, "Open file…", "Ctrl+O").clicked() {
-            if let Some(path) = crate::ui::FileDialog::new()
-                .add_filter("Media Files", &MEDIA_EXTENSIONS)
-                .pick_file()
-            {
-                playlist.add(&path);
-                playlist.current_index = Some(playlist.items.len() - 1);
-                let _ = player.load_file(&path);
-                if !cx.recent_files.contains(&path) {
-                    cx.recent_files.push(path);
-                }
+            if let Some(path) = media_dialog().pick_file() {
+                *cx.open_request = Some(OpenRequest { paths: vec![path], play: true });
             }
             ui.close();
         }
 
         if item(ui, "Open files…", "").clicked() {
-            if let Some(files) = crate::ui::FileDialog::new()
-                .add_filter("Media Files", &MEDIA_EXTENSIONS)
-                .pick_files()
-            {
-                for f in files {
-                    playlist.add(&f);
-                    if !cx.recent_files.contains(&f) {
-                        cx.recent_files.push(f);
-                    }
-                }
+            if let Some(files) = media_dialog().pick_files() {
+                *cx.open_request = Some(OpenRequest { paths: files, play: idle });
             }
             ui.close();
         }
 
         if item(ui, "Open folder…", "").clicked() {
             if let Some(folder) = crate::ui::FileDialog::new().pick_folder() {
-                if let Ok(entries) = std::fs::read_dir(folder) {
-                    for entry in entries.flatten() {
-                        let p = entry.path();
-                        if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                            if Playlist::is_supported_media_extension(ext) {
-                                playlist.add(&p);
-                            }
-                        }
-                    }
-                }
+                *cx.open_request = Some(OpenRequest { paths: vec![folder], play: idle });
             }
             ui.close();
         }
@@ -98,7 +100,7 @@ impl MenuBarView {
                 ui.label(RichText::new("Nothing here yet").color(Theme::TEXT_FAINT));
             } else {
                 let mut to_load = None;
-                for file in cx.recent_files.iter().rev() {
+                for file in cx.recent_files.iter() {
                     let label = file
                         .file_name()
                         .map(|f| f.to_string_lossy().to_string())
@@ -109,10 +111,41 @@ impl MenuBarView {
                     }
                 }
                 if let Some(p) = to_load {
-                    playlist.add(&p);
-                    playlist.current_index = Some(playlist.items.len() - 1);
-                    let _ = player.load_file(&p);
+                    *cx.open_request = Some(OpenRequest { paths: vec![p], play: true });
                 }
+                ui.separator();
+                if item(ui, "Clear recent", "").clicked() {
+                    cx.recent_files.clear();
+                    ui.close();
+                }
+            }
+        });
+
+        ui.menu_button("Playlist", |ui| {
+            if item(ui, "Import playlist…", "").clicked() {
+                if let Some(path) = crate::ui::FileDialog::new()
+                    .add_filter("Playlists", &PLAYLIST_EXTENSIONS)
+                    .pick_file()
+                {
+                    *cx.open_request = Some(OpenRequest { paths: vec![path], play: idle });
+                }
+                ui.close();
+            }
+            if ui
+                .add_enabled(!playlist.items.is_empty(), egui::Button::new("Save playlist…").frame_when_inactive(false))
+                .clicked()
+            {
+                if let Some(path) = crate::ui::FileDialog::new()
+                    .add_filter("M3U playlist", &["m3u8", "m3u"])
+                    .set_file_name("playlist.m3u8")
+                    .save_file()
+                {
+                    *cx.toast_msg = Some(match playlist.save_m3u(&path) {
+                        Ok(()) => format!("Playlist saved ({} items)", playlist.items.len()),
+                        Err(e) => e,
+                    });
+                }
+                ui.close();
             }
         });
 
@@ -157,6 +190,42 @@ impl MenuBarView {
                         player.set_speed(s);
                         ui.close();
                     }
+                }
+            });
+            if item(ui, "Jump to time…", "Ctrl+G").clicked() {
+                *cx.open_jump = true;
+                ui.close();
+            }
+            ui.menu_button("A-B loop", |ui| {
+                let label = |p: Option<f64>| p.map_or_else(|| "–".to_string(), super::controls::format_time);
+                if item(ui, &format!("Set A ({})", label(cx.ab_loop.a)), "B").clicked() {
+                    let t = player.current_time_secs();
+                    cx.ab_loop.set_a(t);
+                    *cx.toast_msg = Some(format!("Loop A: {}", super::controls::format_time(t)));
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(
+                        cx.ab_loop.a.is_some(),
+                        egui::Button::new(format!("Set B ({})", label(cx.ab_loop.b))).frame_when_inactive(false),
+                    )
+                    .clicked()
+                {
+                    let t = player.current_time_secs();
+                    *cx.toast_msg = Some(if cx.ab_loop.set_b(t) {
+                        format!("Loop B: {}", super::controls::format_time(t))
+                    } else {
+                        "Loop B must be after A".to_string()
+                    });
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(cx.ab_loop.a.is_some(), egui::Button::new("Clear loop").frame_when_inactive(false))
+                    .clicked()
+                {
+                    cx.ab_loop.clear();
+                    *cx.toast_msg = Some("A-B loop cleared".to_string());
+                    ui.close();
                 }
             });
             ui.menu_button("Jump", |ui| {
@@ -239,12 +308,18 @@ impl MenuBarView {
                 *cx.toggle_fullscreen = true;
                 ui.close();
             }
+            let on_top = *cx.always_on_top;
+            if item(ui, if on_top { "✓ Always on top" } else { "Always on top" }, "Ctrl+T").clicked() {
+                *cx.always_on_top = !on_top;
+                *cx.toast_msg = Some(if on_top { "Always on top off" } else { "Always on top" }.to_string());
+                ui.close();
+            }
         });
 
         ui.menu_button("Subtitles", |ui| {
             if item(ui, "Load file…", "").clicked() {
                 if let Some(path) = crate::ui::FileDialog::new()
-                    .add_filter("Subtitles", &["srt", "vtt", "ass"])
+                    .add_filter("Subtitles", &crate::media::subtitle::SUBTITLE_EXTENSIONS)
                     .pick_file()
                 {
                     let _ = player.load_external_subtitle(path);
@@ -286,6 +361,10 @@ impl MenuBarView {
         }
         if item(ui, "Preferences…", "Ctrl+P").clicked() {
             *cx.show_preferences = true;
+            ui.close();
+        }
+        if item(ui, "Keyboard shortcuts", "F1").clicked() {
+            *cx.show_shortcuts = true;
             ui.close();
         }
         if item(ui, "About AirMedia", "").clicked() {

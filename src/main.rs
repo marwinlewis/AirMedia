@@ -2,6 +2,7 @@
 
 use airmedia::app::AirMediaApp;
 use airmedia::app_info::APP_NAME;
+use airmedia::media::is_url;
 use airmedia::ui;
 use eframe::egui;
 use std::env;
@@ -21,7 +22,15 @@ fn load_app_icon() -> Option<egui::IconData> {
 }
 
 fn main() -> eframe::Result<()> {
-    let cli_file: Option<PathBuf> = env::args().nth(1).map(PathBuf::from);
+    // Every argument is a file, folder, playlist or stream URL ("Open with" can pass many).
+    // Flag-like arguments (e.g. macOS's -psn_*) are ignored.
+    let cli_inputs: Vec<PathBuf> = env::args_os()
+        .skip(1)
+        .filter(|a| !a.to_string_lossy().starts_with('-'))
+        .map(PathBuf::from)
+        // Store absolute paths so the restored playlist works from any working directory.
+        .map(|p| if is_url(&p) { p } else { std::path::absolute(&p).unwrap_or(p) })
+        .collect();
 
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1120.0, 680.0])
@@ -46,14 +55,7 @@ fn main() -> eframe::Result<()> {
             ui::theme::Theme::install(&cc.egui_ctx);
 
             let mut app = AirMediaApp::new();
-
-            if let Some(path) = cli_file {
-                if path.exists() {
-                    app.playlist.add(&path);
-                    app.playlist.current_index = Some(0);
-                    let _ = app.player.load_file(&path);
-                }
-            }
+            app.open_paths(cli_inputs, true);
 
             Ok(Box::new(app))
         }),

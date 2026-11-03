@@ -8,6 +8,9 @@ use eframe::egui::{self, Color32, ProgressBar, RichText, Ui};
 pub struct CodecDialogState {
     pub status: DependencyStatus,
     pub downloader: CodecDownloader,
+    /// Whether `status` was already refreshed after the last completed download, so the
+    /// (process-spawning) dependency check runs once instead of every frame.
+    refreshed_after_download: bool,
 }
 
 impl Default for CodecDialogState {
@@ -15,6 +18,7 @@ impl Default for CodecDialogState {
         Self {
             status: check_dependencies(),
             downloader: CodecDownloader::new(),
+            refreshed_after_download: false,
         }
     }
 }
@@ -25,8 +29,15 @@ impl CodecDialog {
     pub fn show(ui: &Ui, state: &mut CodecDialogState, open: &mut bool) {
         // Auto-refresh when download completes
         let dl_state = state.downloader.state();
-        if let DownloadState::Completed(_) = dl_state {
-            state.status = check_dependencies();
+        match dl_state {
+            DownloadState::Completed(_) if !state.refreshed_after_download => {
+                state.status = check_dependencies();
+                state.refreshed_after_download = true;
+            }
+            DownloadState::Downloading(_) | DownloadState::Extracting => {
+                state.refreshed_after_download = false;
+            }
+            _ => {}
         }
 
         show_dialog(ui, "Media Engine Codecs (FFmpeg / FFprobe)", open, 540.0, |ui, close| {
@@ -48,7 +59,7 @@ impl CodecDialog {
                                 let mode_msg = if state.status.is_preinstalled() {
                                     "Using preinstalled system FFmpeg codecs (Zero download required)."
                                 } else {
-                                    "Using verified local application codecs."
+                                    "Using codecs installed for AirMedia."
                                 };
                                 ui.label(RichText::new(mode_msg).font(Theme::font(12.0)).color(Theme::TEXT_MUTED));
                             });

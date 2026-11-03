@@ -1,6 +1,7 @@
-use super::create_hidden_command;
+use super::{create_hidden_command, ffmpeg_input_args, is_url, output_with_timeout, MAX_VIDEO_DIMENSION};
 use serde::Deserialize;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct MediaInfo {
@@ -57,6 +58,25 @@ pub struct StreamInfo {
     pub channel_layout: Option<String>,
     #[serde(default)]
     pub tags: Option<serde_json::Value>,
+    #[serde(default)]
+    pub side_data_list: Option<Vec<serde_json::Value>>,
+}
+
+impl StreamInfo {
+    /// Display rotation in degrees (display matrix side data, or the legacy `rotate` tag).
+    pub fn rotation_degrees(&self) -> i64 {
+        let from_side_data = self.side_data_list.as_ref().and_then(|list| {
+            list.iter().find_map(|sd| sd.get("rotation").and_then(|r| r.as_f64().or_else(|| r.as_str()?.parse().ok())))
+        });
+        let from_tag = || {
+            self.tags
+                .as_ref()
+                .and_then(|t| t.get("rotate"))
+                .and_then(|r| r.as_str())
+                .and_then(|r| r.parse::<f64>().ok())
+        };
+        from_side_data.or_else(from_tag).map_or(0, |r| r.round() as i64)
+    }
 }
 
 impl MediaInfo {
@@ -64,22 +84,17 @@ impl MediaInfo {
         let path_ref = path.as_ref();
         let path_str = path_ref.to_string_lossy().to_string();
 
-        let output = create_hidden_command("ffprobe")
-            .args([
-                "-v",
-                "quiet",
-                "-print_format",
-                "json",
-                "-show_format",
-                "-show_streams",
-                &path_str,
-            ])
-            .output()
-            .map_err(|e| format!("Failed to run ffprobe: {e}. Ensure ffmpeg/ffprobe is installed."))?;
+        let mut cmd = create_hidden_command("ffprobe");
+        cmd.args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"]);
+        cmd.args(ffmpeg_input_args(path_ref));
+        // Never let a dead stream or a pathological file freeze the caller indefinitely.
+        let timeout = if is_url(path_ref) { Duration::from_secs(15) } else { Duration::from_secs(30) };
+        let output = output_with_timeout(cmd, timeout)
+            .map_err(|e| format!("Failed to run ffprobe on {path_str}: {e}. Ensure ffmpeg/ffprobe is installed."))?;
 
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("ffprobe error: {err}"));
+            return Err(format!("ffprobe error: {}", err.trim()));
         }
 
         let json_str = String::from_utf8_lossy(&output.stdout);
@@ -119,14 +134,37 @@ impl MediaInfo {
         self.streams.iter().filter(|s| s.codec_type == "subtitle").collect()
     }
 
-    pub fn video_dimensions(&self) -> Option<(u32, u32)> {
-        self.primary_video_stream().and_then(|v| {
+    /// Rejects media whose metadata would make the player misbehave (absurd frame sizes, or
+    /// nothing playable at all).
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(v) = self.primary_video_stream() {
             if let (Some(w), Some(h)) = (v.width, v.height) {
-                Some((w, h))
-            } else {
-                None
+                if w > MAX_VIDEO_DIMENSION || h > MAX_VIDEO_DIMENSION {
+                    return Err(format!(
+                        "video size {w}x{h} exceeds the supported maximum of {MAX_VIDEO_DIMENSION}px"
+                    ));
+                }
             }
-        })
+        }
+        if self.primary_video_stream().is_none() && self.audio_streams().is_empty() {
+            return Err("no audio or video streams found".to_string());
+        }
+        Ok(())
+    }
+
+    /// Displayed frame size: swaps width/height for 90°/270° rotated video (ffmpeg autorotates
+    /// the decoded frames). Returns `None` for missing, zero or oversized dimensions.
+    pub fn video_dimensions(&self) -> Option<(u32, u32)> {
+        let v = self.primary_video_stream()?;
+        let (w, h) = (v.width?, v.height?);
+        if w == 0 || h == 0 || w > MAX_VIDEO_DIMENSION || h > MAX_VIDEO_DIMENSION {
+            return None;
+        }
+        if v.rotation_degrees().rem_euclid(180) == 90 {
+            Some((h, w))
+        } else {
+            Some((w, h))
+        }
     }
 
     pub fn fps(&self) -> f64 {

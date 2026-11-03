@@ -6,12 +6,16 @@ use eframe::egui::{self, Ui};
 use std::path::PathBuf;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct PreferencesState {
     pub auto_hide_seconds: f32,
     pub subtitle_size: f32,
     pub default_volume: f32,
     pub screenshot_dir: PathBuf,
     pub screenshot_format: ScreenshotFormat,
+    pub hw_accel: HwAccelMode,
+    /// Keep the player window above other windows (Ctrl+T / app menu).
+    pub always_on_top: bool,
 }
 
 impl Default for PreferencesState {
@@ -22,30 +26,21 @@ impl Default for PreferencesState {
             default_volume: 1.0,
             screenshot_dir: default_pictures_dir(),
             screenshot_format: ScreenshotFormat::Jpg,
+            hw_accel: HwAccelMode::Auto,
+            always_on_top: false,
         }
     }
 }
 
 impl PreferencesState {
     pub fn config_path() -> Option<PathBuf> {
-        #[cfg(windows)]
-        {
-            std::env::var("APPDATA")
-                .ok()
-                .map(|p| PathBuf::from(p).join("airmedia").join("preferences.json"))
-        }
-        #[cfg(not(windows))]
-        {
-            std::env::var("HOME")
-                .ok()
-                .map(|p| PathBuf::from(p).join(".config").join("airmedia").join("preferences.json"))
-        }
+        crate::persistence::config_dir().map(|d| d.join("preferences.json"))
     }
 
     pub fn load() -> Self {
         if let Some(path) = Self::config_path() {
             if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(prefs) = serde_json::from_str::<Self>(&content) {
+                if let Ok(prefs) = serde_json::from_str::<Self>(crate::persistence::strip_bom(&content)) {
                     return prefs;
                 }
             }
@@ -55,14 +50,25 @@ impl PreferencesState {
 
     pub fn save(&self) {
         if let Some(path) = Self::config_path() {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
             if let Ok(json) = serde_json::to_string_pretty(self) {
-                let _ = std::fs::write(path, json);
+                if let Err(e) = crate::persistence::write_atomic(&path, &json) {
+                    eprintln!("Failed to save preferences to {}: {e}", path.display());
+                }
             }
         }
     }
+}
+
+/// Keeps the last `max_chars - 1` characters of `s` behind an ellipsis. Works on chars, not
+/// bytes, so non-ASCII folder names can't split a UTF-8 sequence.
+pub fn shorten_path_label(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let tail: String = s.chars().skip(count - keep).collect();
+    format!("…{tail}")
 }
 
 pub struct PreferencesDialog;
@@ -86,6 +92,8 @@ impl PreferencesDialog {
                         for mode in HwAccelMode::ALL {
                             if ui.selectable_label(player.hw_accel == mode, mode.name()).clicked() {
                                 player.set_hw_accel(mode);
+                                prefs.hw_accel = mode;
+                                changed = true;
                             }
                         }
                     });
@@ -118,11 +126,7 @@ impl PreferencesDialog {
             section_label(ui, "Screenshots");
             setting_row(ui, "Save folder", |ui| {
                 let dir_str = prefs.screenshot_dir.to_string_lossy().to_string();
-                let short_str = if dir_str.len() > 22 {
-                    format!("…{}", &dir_str[dir_str.len() - 21..])
-                } else {
-                    dir_str.clone()
-                };
+                let short_str = shorten_path_label(&dir_str, 22);
                 let current_dir = prefs.screenshot_dir.clone();
 
                 ui.horizontal(|ui| {

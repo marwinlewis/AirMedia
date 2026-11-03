@@ -53,20 +53,27 @@ impl DependencyStatus {
     }
 }
 
+/// Name of the folder next to the executable that holds bundled (portable) codecs.
+pub const PORTABLE_CODECS_DIR: &str = "codecs";
+
 /// Resolves the absolute path for a codec binary (e.g., "ffmpeg" or "ffprobe").
 /// Search priority:
-/// 1. Directory of current running executable (portable distribution)
+/// 1. `codecs` folder beside the running executable (portable distribution)
 /// 2. User AppData directory (%LOCALAPPDATA%\AirMedia\bin on Windows)
 /// 3. System PATH directories (preinstalled codecs)
 /// 4. Fallback to binary name
+///
+/// Binaries sitting directly beside the executable are deliberately ignored: a portable copy
+/// unpacked into Downloads would otherwise run any `ffmpeg.exe` that lands next to it.
 pub fn locate_binary(name: &str) -> (PathBuf, CodecLocation) {
-    // 1. Check beside current executable
+    // 1. Check the bundled codecs folder beside the current executable
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(parent) = exe_path.parent() {
+            let dir = parent.join(PORTABLE_CODECS_DIR);
             let candidate = if cfg!(windows) {
-                parent.join(format!("{name}.exe"))
+                dir.join(format!("{name}.exe"))
             } else {
-                parent.join(name)
+                dir.join(name)
             };
             if candidate.is_file() {
                 return (candidate.clone(), CodecLocation::Portable(candidate));
@@ -203,6 +210,10 @@ impl CodecDownloader {
     }
 }
 
+/// Official gyan.dev "release essentials" build; a matching `.sha256` is published beside it.
+#[cfg(windows)]
+const FFMPEG_DOWNLOAD_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+
 #[allow(unused_variables)]
 fn run_on_the_fly_installer(state: &Arc<Mutex<DownloadState>>) -> Result<String, String> {
     #[cfg(windows)]
@@ -220,23 +231,46 @@ fn run_on_the_fly_installer(state: &Arc<Mutex<DownloadState>>) -> Result<String,
             *s = DownloadState::Downloading("Downloading official FFmpeg release essentials...".to_string());
         }
 
+        // Work in a fresh, unpredictable directory we own rather than shared %TEMP% names.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let work_dir = PathBuf::from(&local_app_data)
+            .join("AirMedia")
+            .join("tmp")
+            .join(format!("dl-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&work_dir)
+            .map_err(|e| format!("Failed to create directory {}: {e}", work_dir.display()))?;
+
+        let ps_quote = |p: &std::path::Path| p.to_string_lossy().replace('\'', "''");
         let ps_script = format!(
             r#"
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $destDir = '{dest}'
-$zipPath = Join-Path $env:TEMP 'airmedia-ffmpeg.zip'
-$extractDir = Join-Path $env:TEMP 'airmedia-ffmpeg-extract'
+$workDir = '{work}'
+$zipPath = Join-Path $workDir 'ffmpeg.zip'
+$extractDir = Join-Path $workDir 'extract'
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-$url = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
+$url = '{url}'
 
 if (Get-Command curl.exe -ErrorAction SilentlyContinue) {{
-    curl.exe -L -s -o $zipPath $url
+    curl.exe --fail --location --silent --show-error --proto '=https' --tlsv1.2 -o $zipPath $url
+    if ($LASTEXITCODE -ne 0) {{ throw "Download failed (curl exit $LASTEXITCODE)" }}
+    $expected = (curl.exe --fail --location --silent --show-error --proto '=https' --tlsv1.2 "$url.sha256")
+    if ($LASTEXITCODE -ne 0) {{ throw "Checksum download failed (curl exit $LASTEXITCODE)" }}
 }} else {{
     Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
+    $expected = (Invoke-WebRequest -Uri "$url.sha256" -UseBasicParsing).Content
 }}
+if ($expected -is [byte[]]) {{ $expected = [Text.Encoding]::ASCII.GetString($expected) }}
+$expected = ("$expected".Trim() -split '\s+')[0].ToLowerInvariant()
+if ($expected -notmatch '^[0-9a-f]{{64}}$') {{ throw 'Published checksum is missing or malformed.' }}
+$actual = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actual -ne $expected) {{ throw "SHA-256 mismatch: expected $expected, got $actual" }}
 
-if (Test-Path $extractDir) {{ Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue }}
 Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
 
 $ffmpeg = Get-ChildItem -Path $extractDir -Filter 'ffmpeg.exe' -Recurse | Select-Object -First 1
@@ -248,29 +282,31 @@ if (-not $ffmpeg -or -not $ffprobe) {{
 
 Copy-Item $ffmpeg.FullName (Join-Path $destDir 'ffmpeg.exe') -Force
 Copy-Item $ffprobe.FullName (Join-Path $destDir 'ffprobe.exe') -Force
-
-Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
-Remove-Item -Force $zipPath -ErrorAction SilentlyContinue
 "#,
-            dest = target_dir.to_string_lossy().replace('\'', "''")
+            dest = ps_quote(&target_dir),
+            work = ps_quote(&work_dir),
+            url = FFMPEG_DOWNLOAD_URL,
         );
 
+        // Inline -Command scripts are not subject to execution policy, so no bypass is needed.
         let mut cmd = Command::new("powershell");
-        cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_script]);
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &ps_script]);
         cmd.creation_flags(CREATE_NO_WINDOW);
 
-        let output = cmd.output().map_err(|e| format!("Failed to run PowerShell downloader: {e}"))?;
+        let output = cmd.output();
+        let _ = std::fs::remove_dir_all(&work_dir);
+        let output = output.map_err(|e| format!("Failed to run PowerShell downloader: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Download/Extraction failed: {stderr}"));
+            return Err(format!("Download/Extraction failed: {}", stderr.trim()));
         }
 
         let ffmpeg_exe = target_dir.join("ffmpeg.exe");
         let ffprobe_exe = target_dir.join("ffprobe.exe");
 
         if ffmpeg_exe.is_file() && ffprobe_exe.is_file() {
-            Ok(format!("Installed codecs into {}", target_dir.display()))
+            Ok(format!("Installed SHA-256 verified codecs into {}", target_dir.display()))
         } else {
             Err("Codecs could not be verified after installation.".to_string())
         }

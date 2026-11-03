@@ -1,4 +1,4 @@
-use super::create_hidden_command;
+use super::{create_hidden_command, ffmpeg_input_args};
 use parking_lot::Mutex;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum HwAccelMode {
     #[default]
     Auto,
@@ -87,6 +87,10 @@ pub struct VideoDecoder {
     step_one_frame: Arc<AtomicBool>,
     current_hw_accel: HwAccelMode,
     current_child: Arc<Mutex<Option<Child>>>,
+    /// Set when the decoder reached the natural end of the stream.
+    finished: Arc<AtomicBool>,
+    /// Set when the requested hardware decoder produced nothing and we retried on the CPU.
+    sw_fallback: Arc<AtomicBool>,
 }
 
 impl VideoDecoder {
@@ -102,6 +106,8 @@ impl VideoDecoder {
             step_one_frame: Arc::new(AtomicBool::new(false)),
             current_hw_accel: HwAccelMode::Auto,
             current_child: Arc::new(Mutex::new(None)),
+            finished: Arc::new(AtomicBool::new(false)),
+            sw_fallback: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -114,6 +120,7 @@ impl VideoDecoder {
         seek_secs: f64,
         speed: f32,
         hw_accel: HwAccelMode,
+        video_filter: Option<String>,
         audio_clock_fn: Option<Arc<dyn Fn() -> f64 + Send + Sync>>,
     ) {
         self.stop();
@@ -123,7 +130,11 @@ impl VideoDecoder {
         self.is_paused = Arc::new(AtomicBool::new(false));
         self.step_one_frame = Arc::new(AtomicBool::new(false));
         self.frame_ready.store(false, Ordering::SeqCst);
+        self.finished = Arc::new(AtomicBool::new(false));
+        self.sw_fallback = Arc::new(AtomicBool::new(false));
 
+        let finished = Arc::clone(&self.finished);
+        let sw_fallback = Arc::clone(&self.sw_fallback);
         let shared_frame = Arc::clone(&self.shared_frame);
         let frame_ready = Arc::clone(&self.frame_ready);
         let stop_flag = Arc::clone(&self.stop_flag);
@@ -142,6 +153,9 @@ impl VideoDecoder {
                 seek_secs,
                 speed,
                 hw_accel,
+                video_filter,
+                finished,
+                sw_fallback,
                 shared_frame,
                 frame_ready,
                 stop_flag,
@@ -159,6 +173,20 @@ impl VideoDecoder {
 
     pub fn is_running(&self) -> bool {
         self.worker_handle.is_some() && !self.stop_flag.load(Ordering::SeqCst)
+    }
+
+    /// True while a decode pipeline exists for the current media (even if it already ended).
+    pub fn has_worker(&self) -> bool {
+        self.worker_handle.is_some()
+    }
+
+    /// True once the decoder hit end of stream (or could not decode at all).
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::SeqCst)
+    }
+
+    pub fn fell_back_to_software(&self) -> bool {
+        self.sw_fallback.load(Ordering::SeqCst)
     }
 
     pub fn step_forward(&self) {
@@ -216,10 +244,23 @@ impl VideoDecoder {
     }
 }
 
+/// Builds the `-vf` chain: optional user color adjustments, then a scale to exactly the
+/// expected frame size so the pipe reader can never be desynchronised by odd metadata.
+pub fn build_video_filter(width: u32, height: u32, video_filter: Option<&str>) -> String {
+    let scale = format!("scale={width}:{height}");
+    match video_filter {
+        Some(f) if !f.is_empty() => format!("{f},{scale}"),
+        _ => scale,
+    }
+}
+
 fn spawn_ffmpeg_decoder(
     path: &Path,
     seek_secs: f64,
     hw_accel: HwAccelMode,
+    width: u32,
+    height: u32,
+    video_filter: Option<&str>,
 ) -> Result<Child, String> {
     let mut cmd = create_hidden_command("ffmpeg");
     cmd.args(["-hide_banner", "-loglevel", "error"]);
@@ -232,18 +273,19 @@ fn spawn_ffmpeg_decoder(
         cmd.args(["-ss", &format!("{seek_secs:.3}")]);
     }
 
-    let path_str = path.to_string_lossy().to_string();
+    cmd.args(ffmpeg_input_args(path));
     cmd.args([
-        "-i",
-        &path_str,
         "-an",
         "-sn",
+        "-vf",
+        &build_video_filter(width, height, video_filter),
         "-f",
         "rawvideo",
         "-pix_fmt",
         "rgba",
         "-",
     ]);
+    cmd.stdin(Stdio::null());
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::null());
@@ -259,6 +301,9 @@ fn run_video_worker(
     mut current_seek: f64,
     speed: f32,
     hw_accel: HwAccelMode,
+    video_filter: Option<String>,
+    finished: Arc<AtomicBool>,
+    sw_fallback: Arc<AtomicBool>,
     shared_frame: Arc<Mutex<Option<VideoFrame>>>,
     frame_ready: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
@@ -269,35 +314,25 @@ fn run_video_worker(
     current_child: Arc<Mutex<Option<Child>>>,
     audio_clock_fn: Option<Arc<dyn Fn() -> f64 + Send + Sync>>,
 ) {
-    let frame_bytes = (width as usize) * (height as usize) * 4;
-    if frame_bytes == 0 {
+    if width == 0 || height == 0 || width > super::MAX_VIDEO_DIMENSION || height > super::MAX_VIDEO_DIMENSION {
+        finished.store(true, Ordering::SeqCst);
         return;
     }
+    let frame_bytes = (width as usize) * (height as usize) * 4;
 
     let frame_duration_secs = if fps > 0.0 { 1.0 / fps } else { 1.0 / 30.0 };
+    let mut active_hw = hw_accel;
 
     'restart_loop: loop {
         if stop_flag.load(Ordering::SeqCst) {
             break;
         }
 
-        let mut child = match spawn_ffmpeg_decoder(&path, current_seek, hw_accel) {
+        let mut child = match spawn_ffmpeg_decoder(&path, current_seek, active_hw, width, height, video_filter.as_deref()) {
             Ok(c) => c,
             Err(e) => {
-                // If specific hardware acceleration failed, fallback to software
-                if hw_accel != HwAccelMode::Software {
-                    eprintln!("HW Accel {hw_accel:?} failed ({e}), falling back to software decode");
-                    match spawn_ffmpeg_decoder(&path, current_seek, HwAccelMode::Software) {
-                        Ok(c) => c,
-                        Err(e2) => {
-                            eprintln!("Software fallback also failed: {e2}");
-                            break;
-                        }
-                    }
-                } else {
-                    eprintln!("Video spawn error: {e}");
-                    break;
-                }
+                eprintln!("Video spawn error: {e}");
+                break;
             }
         };
 
@@ -362,6 +397,16 @@ fn run_video_worker(
                         if let Some(mut c) = current_child.lock().take() {
                             let _ = c.wait();
                         }
+                        // The hardware decoder produced nothing at all: retry once on the CPU.
+                        if frame_index == 0
+                            && active_hw != HwAccelMode::Software
+                            && !stop_flag.load(Ordering::SeqCst)
+                        {
+                            eprintln!("HW decoder {active_hw:?} produced no frames, retrying in software");
+                            active_hw = HwAccelMode::Software;
+                            sw_fallback.store(true, Ordering::SeqCst);
+                            continue 'restart_loop;
+                        }
                         break 'restart_loop;
                     }
                     Ok(n) => {
@@ -389,13 +434,27 @@ fn run_video_worker(
                     wall_clock_seek_base + (wall_clock_start.elapsed().as_secs_f64() * speed as f64)
                 };
 
-                let delta = frame_pts - master_time;
+                let mut delta = frame_pts - master_time;
 
-                if delta > 0.002 {
-                    // Video is ahead of master clock -> wait
-                    let sleep_ms = (delta * 1000.0).clamp(1.0, 100.0);
+                // Video is ahead of master clock -> wait in short slices so stop, seek and
+                // pause requests stay responsive and the frame isn't shown early.
+                while delta > 0.002 {
+                    if stop_flag.load(Ordering::SeqCst)
+                        || seek_requested.load(Ordering::SeqCst)
+                        || is_paused.load(Ordering::SeqCst)
+                    {
+                        break;
+                    }
+                    let sleep_ms = (delta * 1000.0).clamp(1.0, 20.0);
                     thread::sleep(Duration::from_millis(sleep_ms as u64));
-                } else if delta < -0.060 {
+                    let now = if let Some(ref audio_clock) = audio_clock_fn {
+                        audio_clock()
+                    } else {
+                        wall_clock_seek_base + (wall_clock_start.elapsed().as_secs_f64() * speed as f64)
+                    };
+                    delta = frame_pts - now;
+                }
+                if delta < -0.060 {
                     // Video is lagging behind master clock by >60ms -> skip frame display to catch up
                     continue;
                 }
@@ -418,5 +477,8 @@ fn run_video_worker(
     if let Some(mut c) = current_child.lock().take() {
         let _ = c.kill();
         let _ = c.wait();
+    }
+    if !stop_flag.load(Ordering::SeqCst) {
+        finished.store(true, Ordering::SeqCst);
     }
 }

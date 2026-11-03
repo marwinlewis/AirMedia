@@ -1,11 +1,12 @@
 use super::icons::{icon_button, icon_button_ex, Icon};
-use super::menu_bar::MEDIA_EXTENSIONS;
+use super::menu_bar::media_dialog;
 use super::theme::Theme;
 use crate::media::MediaPlayer;
 use crate::playlist::{Playlist, RepeatMode};
 use eframe::egui::{self, Align2, Pos2, Rect, RichText, Sense, Ui, Vec2};
 
-/// Slide-in playlist drawer docked to the right edge of the player.
+/// Slide-in playlist drawer docked to the right edge of the player. Click selects, Ctrl/Shift
+/// extend the selection, double-click plays, dragging reorders and Delete removes.
 pub struct PlaylistView;
 
 impl PlaylistView {
@@ -34,6 +35,7 @@ impl PlaylistView {
     /// Returns true when the drawer asked to close.
     fn contents(ui: &mut Ui, playlist: &mut Playlist, player: &mut MediaPlayer) -> bool {
         let mut close = false;
+        let mut remove_selected = false;
 
         // Header
         ui.horizontal(|ui| {
@@ -72,11 +74,8 @@ impl PlaylistView {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             if icon_button(ui, Icon::Plus, 30.0).on_hover_text("Add media").clicked() {
-                if let Some(files) = crate::ui::FileDialog::new()
-                    .add_filter("Media", &MEDIA_EXTENSIONS)
-                    .pick_files()
-                {
-                    for f in files {
+                if let Some(files) = media_dialog().pick_files() {
+                    for f in Playlist::collect_media(&files).media {
                         playlist.add(f);
                     }
                 }
@@ -103,6 +102,19 @@ impl PlaylistView {
                 {
                     playlist.clear();
                 }
+                let selected = playlist.selection.len();
+                if selected > 0
+                    && ui
+                        .add(
+                            egui::Button::new(RichText::new(format!("Remove {selected}")).size(12.5).color(Theme::TEXT))
+                                .fill(Theme::white(12))
+                                .corner_radius(Theme::radius_sm()),
+                        )
+                        .on_hover_text("Remove selected (Delete)")
+                        .clicked()
+                {
+                    remove_selected = true;
+                }
             });
         });
 
@@ -111,9 +123,17 @@ impl PlaylistView {
         let query = playlist.filter_query.to_lowercase();
         let mut play_index = None;
         let mut remove_index = None;
+        let mut click: Option<(usize, egui::Modifiers)> = None;
+        let mut drag_started_on = None;
+        let mut drop_slot = None;
+        // Set while a row drag is in progress (survives across frames).
+        let drag_id = ui.scope_id().with("playlist_drag");
+        let anchor_id = ui.scope_id().with("playlist_anchor");
+        let dragging = ui.memory(|m| m.data.get_temp::<bool>(drag_id).unwrap_or(false));
 
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
+            .scroll_source(egui::scroll_area::ScrollSource { drag: egui::scroll_area::DragScroll::Never, ..Default::default() })
             .show(ui, |ui| {
                 if playlist.items.is_empty() {
                     ui.add_space(48.0);
@@ -129,18 +149,28 @@ impl PlaylistView {
                 }
 
                 ui.spacing_mut().item_spacing.y = 2.0;
+                // (item index, row rect) of every visible row, for drop-slot hit testing.
+                let mut rows: Vec<(usize, Rect)> = Vec::new();
                 for (idx, item) in playlist.items.iter().enumerate() {
                     if !query.is_empty() && !item.title.to_lowercase().contains(&query) {
                         continue;
                     }
                     let is_current = playlist.current_index == Some(idx);
+                    let is_selected = playlist.selection.contains(&idx);
                     let (rect, resp) =
-                        ui.allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::click());
-                    let hovered = ui.rect_contains_pointer(rect);
+                        ui.allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::click_and_drag());
+                    rows.push((idx, rect));
+                    let hovered = !dragging && ui.rect_contains_pointer(rect);
                     let painter = ui.painter();
 
-                    if is_current || hovered {
-                        let fill = if is_current { Theme::white(14) } else { Theme::white(8) };
+                    if is_current || is_selected || hovered {
+                        let fill = if is_selected {
+                            Theme::ACCENT.gamma_multiply(0.35)
+                        } else if is_current {
+                            Theme::white(14)
+                        } else {
+                            Theme::white(8)
+                        };
                         painter.rect_filled(rect, Theme::radius_sm(), fill);
                     }
 
@@ -169,7 +199,7 @@ impl PlaylistView {
 
                     // Title (truncated to fit, leaving room for the remove button)
                     let title_max = rect.width() - 36.0 - 34.0;
-                    let color = if is_current { Theme::TEXT } else { Theme::TEXT_MUTED };
+                    let color = if is_current || is_selected { Theme::TEXT } else { Theme::TEXT_MUTED };
                     let font = if is_current { Theme::font_semibold(13.5) } else { Theme::font(13.5) };
                     let mut job = egui::text::LayoutJob::simple_singleline(item.title.clone(), font, color);
                     job.wrap = egui::text::TextWrapping::truncate_at_width(title_max);
@@ -191,19 +221,104 @@ impl PlaylistView {
                         }
                     }
 
-                    if resp.double_clicked() || (resp.clicked() && !is_current) {
+                    if resp.drag_started() {
+                        drag_started_on = Some(idx);
+                    }
+                    if resp.double_clicked() {
                         play_index = Some(idx);
+                    } else if resp.clicked() {
+                        click = Some((idx, ui.input(|i| i.modifiers)));
+                    }
+                }
+
+                // While dragging: find the slot under the pointer, draw the insertion line and
+                // scroll when the pointer nears the top/bottom edge.
+                if dragging || drag_started_on.is_some() {
+                    if let (Some(p), Some(last)) = (ui.ctx().pointer_interact_pos(), rows.last().copied()) {
+                        let (slot, y) = rows
+                            .iter()
+                            .find(|(_, r)| p.y < r.center().y)
+                            .map(|(i, r)| (*i, r.min.y - 1.0))
+                            .unwrap_or((last.0 + 1, last.1.max.y + 1.0));
+                        let x = last.1.x_range();
+                        ui.painter().line_segment(
+                            [Pos2::new(x.min, y), Pos2::new(x.max, y)],
+                            egui::Stroke::new(2.0, Theme::ACCENT_SOFT),
+                        );
+                        drop_slot = Some(slot);
+
+                        let clip = ui.clip_rect();
+                        let edge = 28.0;
+                        if p.y < clip.min.y + edge {
+                            ui.scroll_with_delta(Vec2::new(0.0, 8.0));
+                        } else if p.y > clip.max.y - edge {
+                            ui.scroll_with_delta(Vec2::new(0.0, -8.0));
+                        }
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        ui.ctx().request_repaint();
                     }
                 }
             });
 
+        // Selection: plain click selects one, Ctrl toggles, Shift extends from the anchor.
+        if let Some((idx, mods)) = click {
+            let anchor = ui.memory(|m| m.data.get_temp::<usize>(anchor_id));
+            if mods.shift {
+                let a = anchor.unwrap_or(idx).min(playlist.items.len().saturating_sub(1));
+                if !mods.command {
+                    playlist.selection.clear();
+                }
+                playlist.selection.extend(a.min(idx)..=a.max(idx));
+            } else {
+                if mods.command {
+                    if !playlist.selection.remove(&idx) {
+                        playlist.selection.insert(idx);
+                    }
+                } else {
+                    playlist.selection = [idx].into();
+                }
+                ui.memory_mut(|m| m.data.insert_temp(anchor_id, idx));
+            }
+        }
+
+        // Dragging moves the selection, or just the grabbed row if it wasn't selected.
+        if let Some(idx) = drag_started_on {
+            if !playlist.selection.contains(&idx) {
+                playlist.selection = [idx].into();
+                ui.memory_mut(|m| m.data.insert_temp(anchor_id, idx));
+            }
+            ui.memory_mut(|m| m.data.insert_temp(drag_id, true));
+        }
+        if dragging && !ui.input(|i| i.pointer.any_down()) {
+            ui.memory_mut(|m| m.data.remove::<bool>(drag_id));
+            if let Some(slot) = drop_slot {
+                let moving: Vec<usize> = playlist.selection.iter().copied().collect();
+                let moved = playlist.move_items(&moving, slot);
+                playlist.selection = moved.clone().collect();
+                ui.memory_mut(|m| m.data.insert_temp(anchor_id, moved.start));
+            }
+        }
+
+        // Delete removes the selection unless a text field (e.g. search) has the keyboard.
+        if !playlist.selection.is_empty()
+            && !ui.ctx().egui_wants_keyboard_input()
+            && ui.input(|i| i.key_pressed(egui::Key::Delete))
+        {
+            remove_selected = true;
+        }
+
         if let Some(idx) = play_index {
             playlist.current_index = Some(idx);
+            playlist.selection = [idx].into();
             if let Some(item) = playlist.items.get(idx) {
                 let _ = player.load_file(&item.path);
             }
         }
-        if let Some(idx) = remove_index {
+        if remove_selected {
+            let doomed: Vec<usize> = playlist.selection.iter().copied().collect();
+            playlist.remove_many(&doomed);
+            playlist.selection.clear();
+        } else if let Some(idx) = remove_index {
             playlist.remove(idx);
         }
 
