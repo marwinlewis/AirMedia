@@ -74,8 +74,13 @@ jobs:
         uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
 
       # --- FFmpeg Setup (Enables media decoding and integration testing) ---
-      - name: Set up FFmpeg
+      - name: Set up FFmpeg (Windows & Linux)
+        if: runner.os != 'macOS'
         uses: FedericoCarboni/setup-ffmpeg@36c6454b5a2348e7794ba2d82a21506605921e3d # v3
+
+      - name: Set up FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: HOMEBREW_NO_AUTO_UPDATE=1 brew install ffmpeg
 
       # --- Linux Setup & Build ---
       - name: Install Linux build dependencies
@@ -164,7 +169,12 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: |
+            platforms;android-34
+            build-tools;34.0.0
+            platform-tools
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
