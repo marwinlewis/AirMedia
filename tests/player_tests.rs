@@ -164,33 +164,87 @@ fn strip_tags(s: &str) -> String {
 
 #[test]
 fn test_media_file_probe() {
+    use airmedia::media::check_dependencies;
+    use airmedia::media::probe::MediaInfo;
+
     let test_file = PathBuf::from("test_media.mp4");
-    if test_file.exists() {
-        let output = std::process::Command::new("ffprobe")
-            .args(["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", "test_media.mp4"])
-            .output()
-            .expect("ffprobe should run");
-        assert!(output.status.success());
-        let json_str = String::from_utf8_lossy(&output.stdout);
-        assert!(json_str.contains("h264"));
-        assert!(json_str.contains("1280"));
-        assert!(json_str.contains("720"));
+    if !test_file.exists() {
+        return;
+    }
+
+    let status = check_dependencies();
+    if status.ffprobe.is_found() {
+        let info = MediaInfo::probe(&test_file).expect("MediaInfo probe should succeed when ffprobe is found");
+        let dims = info.video_dimensions();
+        assert_eq!(dims, Some((1280, 720)));
+        assert!(info.duration_seconds() > 0.0);
+        let has_h264 = info.primary_video_stream().map_or(false, |s| {
+            s.codec_name.as_deref() == Some("h264")
+        });
+        assert!(has_h264, "Video codec should be h264");
+    } else {
+        // When ffprobe is missing, MediaInfo::probe should gracefully return an informative error
+        let res = MediaInfo::probe(&test_file);
+        assert!(res.is_err(), "Should return error when ffprobe is missing");
+        let err_msg = res.unwrap_err();
+        assert!(
+            err_msg.contains("ffprobe") || err_msg.contains("installed"),
+            "Error message should mention ffprobe or installation: {err_msg}"
+        );
     }
 }
 
 #[test]
 fn test_dependency_detection() {
-    use airmedia::media::dependency::{check_dependencies, locate_binary};
+    use airmedia::media::dependency::{check_dependencies, locate_binary, CodecLocation};
 
     let (path, loc) = locate_binary("ffmpeg");
     println!("FFmpeg binary located at: {} ({:?})", path.display(), loc);
     let status = check_dependencies();
     println!(
-        "Dependency status: ready={}, is_preinstalled={}",
+        "Dependency status: ready={}, is_preinstalled={}, ffmpeg={:?}, ffprobe={:?}",
         status.is_ready(),
-        status.is_preinstalled()
+        status.is_preinstalled(),
+        status.ffmpeg,
+        status.ffprobe
     );
-    assert!(status.is_ready(), "Preinstalled or local codecs should be detected");
+
+    // Consistency checks on DependencyStatus
+    assert_eq!(
+        status.is_ready(),
+        status.ffmpeg.is_found() && status.ffprobe.is_found(),
+        "is_ready must match whether both ffmpeg and ffprobe are found"
+    );
+
+    let is_preinstalled = matches!(status.ffmpeg, CodecLocation::Preinstalled(_))
+        || matches!(status.ffprobe, CodecLocation::Preinstalled(_));
+    assert_eq!(
+        status.is_preinstalled(),
+        is_preinstalled,
+        "is_preinstalled must match whether ffmpeg or ffprobe is preinstalled"
+    );
+
+    // Verify CodecLocation helper methods across all variants
+    let missing = CodecLocation::Missing;
+    assert!(!missing.is_found());
+    assert!(missing.path().is_none());
+    assert_eq!(missing.display_label(), "Not Found");
+
+    let dummy_path = std::path::PathBuf::from("dummy_bin_path");
+    assert!(CodecLocation::Portable(dummy_path.clone()).is_found());
+    assert!(CodecLocation::LocalApp(dummy_path.clone()).is_found());
+    assert!(CodecLocation::Preinstalled(dummy_path).is_found());
+
+    // Non-existent binary should be reported as Missing
+    let (_, non_existent_loc) = locate_binary("airmedia_nonexistent_binary_xyz_123");
+    assert_eq!(non_existent_loc, CodecLocation::Missing);
+
+    if status.is_ready() {
+        assert!(status.ffmpeg.is_found());
+        assert!(status.ffprobe.is_found());
+        assert!(status.ffmpeg.path().is_some());
+        assert!(status.ffprobe.path().is_some());
+    }
 }
 
 #[test]
@@ -234,11 +288,25 @@ fn test_preferences_defaults_and_serialization() {
 
 #[test]
 fn test_media_player_step_frame_and_screenshot() {
-    use airmedia::media::{MediaPlayer, ScreenshotFormat};
+    use airmedia::media::{check_dependencies, MediaPlayer, ScreenshotFormat};
     use std::path::PathBuf;
 
     let test_file = PathBuf::from("test_media.mp4");
     if !test_file.exists() {
+        return;
+    }
+
+    let status = check_dependencies();
+    if !status.is_ready() {
+        // Codecs not installed on runner: verify that load_file fails gracefully rather than crashing
+        let mut player = MediaPlayer::new();
+        let load_res = player.load_file(&test_file);
+        assert!(load_res.is_err(), "load_file should fail gracefully when codecs are not installed");
+        let err = load_res.unwrap_err();
+        assert!(
+            err.contains("ffprobe") || err.contains("installed"),
+            "Error should indicate missing codecs: {err}"
+        );
         return;
     }
 

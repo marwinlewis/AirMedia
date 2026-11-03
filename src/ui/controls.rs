@@ -430,7 +430,7 @@ fn subtitles_menu(ui: &mut Ui, player: &mut MediaPlayer) {
 
     ui.add_space(2.0);
     if option_row(ui, false, "Load subtitle file…").clicked() {
-        if let Some(path) = rfd::FileDialog::new()
+        if let Some(path) = crate::ui::FileDialog::new()
             .add_filter("Subtitles", &["srt", "vtt", "ass"])
             .pick_file()
         {

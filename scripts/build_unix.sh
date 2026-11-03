@@ -56,8 +56,33 @@ rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_DIR}"
 
 echo "[4/5] Staging distribution files in ${DIST_DIR}..."
-cp "${BINARY_PATH}" "${DIST_DIR}/airmedia"
-chmod +x "${DIST_DIR}/airmedia"
+
+# Setup standard Linux hierarchy and direct binary
+mkdir -p "${DIST_DIR}/bin"
+mkdir -p "${DIST_DIR}/share/applications"
+mkdir -p "${DIST_DIR}/share/icons/hicolor/256x256/apps"
+
+cp "${BINARY_PATH}" "${DIST_DIR}/bin/airmedia"
+cp "${BINARY_PATH}" "${DIST_DIR}/airmedia" # Top-level compatibility
+chmod +x "${DIST_DIR}/bin/airmedia" "${DIST_DIR}/airmedia"
+
+# Desktop integration
+if [ -f "${PROJECT_ROOT}/assets/linux/airmedia.desktop" ]; then
+    cp "${PROJECT_ROOT}/assets/linux/airmedia.desktop" "${DIST_DIR}/share/applications/airmedia.desktop"
+    cp "${PROJECT_ROOT}/assets/linux/airmedia.desktop" "${DIST_DIR}/airmedia.desktop"
+fi
+
+if [ -f "${PROJECT_ROOT}/assets/linux/airmedia.png" ]; then
+    cp "${PROJECT_ROOT}/assets/linux/airmedia.png" "${DIST_DIR}/share/icons/hicolor/256x256/apps/airmedia.png"
+    cp "${PROJECT_ROOT}/assets/linux/airmedia.png" "${DIST_DIR}/airmedia.png"
+fi
+
+# Linux installer helper
+if [ -f "${PROJECT_ROOT}/scripts/install_linux.sh" ]; then
+    cp "${PROJECT_ROOT}/scripts/install_linux.sh" "${DIST_DIR}/install.sh"
+    chmod +x "${DIST_DIR}/install.sh"
+fi
+
 cp "README.md" "${DIST_DIR}/README.md"
 if [ -f "LICENSE" ]; then
     cp "LICENSE" "${DIST_DIR}/LICENSE"

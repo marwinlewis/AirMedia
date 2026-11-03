@@ -287,7 +287,7 @@ impl AirMediaApp {
     }
 
     fn open_file_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
+        if let Some(path) = crate::ui::FileDialog::new()
             .add_filter("Media", &MEDIA_EXTENSIONS)
             .pick_file()
         {

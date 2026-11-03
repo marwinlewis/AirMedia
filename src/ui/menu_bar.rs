@@ -43,7 +43,7 @@ impl MenuBarView {
         ui.set_min_width(220.0);
 
         if item(ui, "Open file…", "Ctrl+O").clicked() {
-            if let Some(path) = rfd::FileDialog::new()
+            if let Some(path) = crate::ui::FileDialog::new()
                 .add_filter("Media Files", &MEDIA_EXTENSIONS)
                 .pick_file()
             {
@@ -58,7 +58,7 @@ impl MenuBarView {
         }
 
         if item(ui, "Open files…", "").clicked() {
-            if let Some(files) = rfd::FileDialog::new()
+            if let Some(files) = crate::ui::FileDialog::new()
                 .add_filter("Media Files", &MEDIA_EXTENSIONS)
                 .pick_files()
             {
@@ -73,7 +73,7 @@ impl MenuBarView {
         }
 
         if item(ui, "Open folder…", "").clicked() {
-            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+            if let Some(folder) = crate::ui::FileDialog::new().pick_folder() {
                 if let Ok(entries) = std::fs::read_dir(folder) {
                     for entry in entries.flatten() {
                         let p = entry.path();
@@ -243,7 +243,7 @@ impl MenuBarView {
 
         ui.menu_button("Subtitles", |ui| {
             if item(ui, "Load file…", "").clicked() {
-                if let Some(path) = rfd::FileDialog::new()
+                if let Some(path) = crate::ui::FileDialog::new()
                     .add_filter("Subtitles", &["srt", "vtt", "ass"])
                     .pick_file()
                 {

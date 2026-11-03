@@ -1,0 +1,25 @@
+#!/bin/sh
+# Gradle Wrapper POSIX Script for AirMedia
+set -e
+
+DIRNAME=$(dirname "$0")
+APP_BASE_NAME=$(basename "$0")
+
+# Check if Gradle is installed locally, else download/use wrapper
+if command -v gradle >/dev/null 2>&1; then
+    exec gradle "$@"
+fi
+
+echo "Downloading Gradle wrapper jar..."
+WRAPPER_JAR="$DIRNAME/gradle/wrapper/gradle-wrapper.jar"
+if [ ! -f "$WRAPPER_JAR" ]; then
+    mkdir -p "$DIRNAME/gradle/wrapper"
+    curl -fsSL https://raw.githubusercontent.com/gradle/gradle/v8.7.0/gradle/wrapper/gradle-wrapper.jar -o "$WRAPPER_JAR" 2>/dev/null || true
+fi
+
+if [ -f "$WRAPPER_JAR" ]; then
+    exec java -jar "$WRAPPER_JAR" "$@"
+fi
+
+echo "ERROR: Please install gradle or ensure network connectivity to fetch wrapper."
+exit 1

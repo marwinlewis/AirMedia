@@ -72,7 +72,7 @@ impl PlaylistView {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             if icon_button(ui, Icon::Plus, 30.0).on_hover_text("Add media").clicked() {
-                if let Some(files) = rfd::FileDialog::new()
+                if let Some(files) = crate::ui::FileDialog::new()
                     .add_filter("Media", &MEDIA_EXTENSIONS)
                     .pick_files()
                 {

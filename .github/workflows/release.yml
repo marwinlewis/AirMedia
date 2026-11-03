@@ -70,6 +70,10 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
+      # --- FFmpeg Setup (Enables media decoding and integration testing) ---
+      - name: Set up FFmpeg
+        uses: FedericoCarboni/setup-ffmpeg@v3
+
       # --- Linux Setup & Build ---
       - name: Install Linux build dependencies
         if: matrix.platform.os == 'ubuntu-latest'
@@ -96,19 +100,38 @@ jobs:
           chmod +x ./scripts/build_unix.sh
           ./scripts/build_unix.sh
 
-      # --- macOS Build (ARM64 + Intel x64 + Universal) ---
+      # --- macOS Build (ARM64 + Intel x64 + Universal App & DMG) ---
       - name: Build and Package (macOS)
         if: matrix.platform.os == 'macos-latest'
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           chmod +x ./scripts/build_macos.sh
           ./scripts/build_macos.sh
 
-      # --- Windows Build (x64) ---
+      # --- Windows Build (x64 Inno Setup Installer & Portable ZIP) ---
+      - name: Install Inno Setup
+        if: matrix.platform.os == 'windows-latest'
+        run: choco install innosetup --no-progress
+
       - name: Build and Package (Windows)
         if: matrix.platform.os == 'windows-latest'
         shell: pwsh
+        env:
+          # Base64 of the .pfx file; the runner has no access to a local certificate path.
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
+          if ($env:WINDOWS_CERTIFICATE_BASE64) {
+            $pfx = Join-Path $env:RUNNER_TEMP "airmedia-signing.pfx"
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+            $env:WINDOWS_CERTIFICATE_PATH = $pfx
+          }
           .\scripts\build_windows.ps1
+          if ($pfx) { Remove-Item $pfx -Force -ErrorAction SilentlyContinue }
 
       # --- Upload Artifacts for Workflow Run ---
       - name: Upload Build Artifacts
@@ -116,15 +139,59 @@ jobs:
         with:
           name: release-${{ matrix.platform.name }}
           path: |
+            dist/*.exe
             dist/*.zip
+            dist/*.dmg
             dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  build-android:
+    name: Build (android)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build and Package (Android APK)
+        run: |
+          chmod +x ./scripts/build_android.sh
+          ./scripts/build_android.sh
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-android
+          path: |
+            dist/*.apk
             dist/*.sha256
           if-no-files-found: error
           retention-days: 14
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, build-android]
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
     runs-on: ubuntu-latest
     permissions:
@@ -169,8 +236,11 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: ${{ env.RELEASE_TITLE }}
           files: |
+            dist/*.exe
             dist/*.zip
+            dist/*.dmg
             dist/*.tar.gz
+            dist/*.apk
             dist/*.sha256
             dist/SHA256SUMS.txt
           draft: ${{ inputs.draft || false }}

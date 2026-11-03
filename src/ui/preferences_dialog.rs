@@ -130,7 +130,7 @@ impl PreferencesDialog {
                         .on_hover_text(format!("Click to change folder\nCurrent: {dir_str}"))
                         .clicked()
                     {
-                        if let Some(folder) = rfd::FileDialog::new()
+                        if let Some(folder) = crate::ui::FileDialog::new()
                             .set_directory(&current_dir)
                             .pick_folder()
                         {

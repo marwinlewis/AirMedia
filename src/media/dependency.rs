@@ -203,6 +203,7 @@ impl CodecDownloader {
     }
 }
 
+#[allow(unused_variables)]
 fn run_on_the_fly_installer(state: &Arc<Mutex<DownloadState>>) -> Result<String, String> {
     #[cfg(windows)]
     {

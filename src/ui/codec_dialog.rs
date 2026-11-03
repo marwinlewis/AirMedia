@@ -167,7 +167,7 @@ impl CodecDialog {
                             }
 
                             if ui.add(secondary_button("Locate Folder...")).clicked() {
-                                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                if let Some(folder) = crate::ui::FileDialog::new().pick_folder() {
                                     // Test if folder has ffmpeg
                                     let ff = folder.join("ffmpeg.exe");
                                     let fp = folder.join("ffprobe.exe");

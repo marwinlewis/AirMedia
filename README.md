@@ -83,6 +83,28 @@ AirMedia uses a minimal, immersive interface: the video fills the window and all
 
 ---
 
+## 🎨 Asset Generation (`dist/airmedia.png`)
+
+AirMedia includes an automated asset generation engine that derives all multi-platform icons, macOS ICNS bundles, Windows ICO frames, Linux hicolor themes, and Android mipmap packages directly from the high-resolution source icon at `dist/airmedia.png`:
+
+```bash
+# Via Cargo example
+cargo run --example generate_assets
+
+# Or via dedicated scripts
+.\scripts\generate_assets.ps1   # PowerShell
+./scripts/generate_assets.sh    # Linux / macOS Bash
+```
+
+**Generated Assets:**
+- **Primary Desktop Icon**: `assets/icon.png` (512x512 crisp PNG)
+- **Windows Icon**: `assets/windows/icon.ico` (multi-resolution ICO with 16, 24, 32, 48, 64, 128, 256 px frames)
+- **macOS Bundle Icon**: `assets/macos/AppIcon.icns` (multi-resolution ICNS with 16, 32, 64, 128, 256, 512, 1024 px frames)
+- **Linux Icons**: `assets/linux/airmedia.png` & standard `assets/linux/icons/hicolor/{16 to 512}/apps/airmedia.png`
+- **Android Icons**: `assets/android/` & `android/app/src/main/res/` mipmaps (`mdpi`, `hdpi`, `xhdpi`, `xxhdpi`, `xxxhdpi` with standard, round, and adaptive foregrounds, plus 512x512 Play Store icon)
+
+---
+
 ## 🚀 Building & Distribution
 
 ### Codec Prerequisites & Smart On-The-Fly Resolution
@@ -101,7 +123,7 @@ AirMedia includes automated production build scripts that run the test suite, co
 
 Run from PowerShell:
 ```powershell
-# Standard lightweight production build (~12.5 MB, prerequisite mode)
+# Standard lightweight production build (~12 MB, prerequisite mode)
 .\build.ps1
 
 # Or run via Command Prompt / double-click:
@@ -109,16 +131,9 @@ build.bat
 ```
 
 **Build Output:**
-- **Distribution Directory**: `dist/airmedia-windows-x64/` (~12.5 MB total)
-  - `airmedia.exe` (~12.5 MB optimized stripped binary)
-  - `install.bat` & `install.ps1` (automated installer with on-the-fly prerequisite setup)
-  - `README.md` & `LICENSE`
-- **Release Package**: `dist/airmedia-v0.1.0-windows-x64.zip` (~4.8 MB compressed)
-
-### Installing on User Machines
-Users can simply unzip the release package and:
-- **Option A (Quick Launch)**: Double-click `airmedia.exe` directly. If codecs are missing, AirMedia displays a friendly in-app dialog offering 1-click on-the-fly codec download.
-- **Option B (Desktop Install)**: Double-click `install.bat`. It checks for preinstalled FFmpeg/FFprobe, downloads on the fly only if missing, creates Start Menu and Desktop shortcuts, and registers file associations.
+- **Native Windows Installer**: `dist/airmedia-v<version>-windows-x64-setup.exe` (Industry-standard Inno Setup installer with uninstaller, shortcuts, and AV-safe structure)
+- **Portable Release Package**: `dist/airmedia-v<version>-windows-x64.zip` (~5.2 MB compressed, with embedded manifest & PE resources)
+- **Distribution Directory**: `dist/airmedia-windows-x64/` (~12 MB total)
 
 ### Linux & macOS Production Build (Cross-Platform)
 
@@ -133,7 +148,8 @@ chmod +x scripts/build_unix.sh
 ```
 
 **Build Output:**
-- `dist/airmedia-v<version>-linux-x86_64.tar.gz` and `.sha256`
+- `dist/airmedia-v<version>-linux-x86_64.tar.gz` (includes `airmedia` binary, `airmedia.desktop`, high-res icons, and `install.sh`)
+- SHA-256 checksum file
 
 When building on macOS:
 ```bash
@@ -142,16 +158,54 @@ chmod +x scripts/build_macos.sh
 ```
 
 **Build Output:**
-- `dist/airmedia-v<version>-macos-arm64.tar.gz` (Apple Silicon)
-- `dist/airmedia-v<version>-macos-x64.tar.gz` (Intel)
-- `dist/airmedia-v<version>-macos-universal.tar.gz` (Universal binary for both architectures)
+- `dist/airmedia-v<version>-macos-universal.dmg` (Apple Disk Image with drag-and-drop `/Applications` install)
+- `dist/airmedia-v<version>-macos-universal.tar.gz` (Universal `AirMedia.app` bundle)
+- `dist/airmedia-v<version>-macos-arm64.tar.gz` (Apple Silicon `AirMedia.app`)
+- `dist/airmedia-v<version>-macos-x64.tar.gz` (Intel `AirMedia.app`)
 - SHA-256 checksum files for each package
+
+### Android Production Build (Mobile APK)
+
+AirMedia runs directly on Android via `android.app.NativeActivity` with zero Java boilerplate overhead, leveraging Vulkan GPU presentation and NDK hardware decoding.
+
+To compile for Android:
+```bash
+# Prerequisites: Android SDK & NDK, Java 17+, cargo-ndk
+cargo install cargo-ndk --locked
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+
+# Build and package APK
+chmod +x scripts/build_android.sh
+./scripts/build_android.sh
+```
+
+Or from PowerShell:
+```powershell
+.\scripts\build_android.ps1
+```
+
+**Build Output:**
+- `dist/airmedia-v<version>-android-universal.apk` (Universal multi-architecture APK with embedded `arm64-v8a`, `armeabi-v7a`, `x86_64` native binaries)
+- SHA-256 checksum file
+
+---
+
+## 🛡️ Antivirus False Positive Mitigation & Code Signing
+
+AirMedia implements thorough executable hardening to prevent flags from Windows Defender, SmartScreen, and macOS Gatekeeper:
+- Embedded Win32 `asInvoker` application manifest, `supportedOS` compatibility tags, and PerMonitorV2 High-DPI awareness.
+- Full Win32 PE `VERSIONINFO` metadata and multi-resolution `.ico` embedded at compile time via `winres`.
+- Standard Inno Setup installer avoiding suspicious PowerShell scripting or `%TEMP%` drops.
+- Hardened Runtime (`--options runtime`) and ad-hoc code signing on macOS `.app` bundles.
+- Optional Authenticode and Apple Developer ID code signing via GitHub Actions secrets.
+
+For detailed false-positive reporting guidelines and submission steps to Microsoft WDSI and VirusTotal, see **[`docs/SECURITY_AND_PACKAGING.md`](docs/SECURITY_AND_PACKAGING.md)**.
 
 ---
 
 ## 🤖 Automated CI/CD & GitHub Releases
 
-AirMedia includes a fully automated GitHub Actions workflow (`.github/workflows/release.yml`) that compiles, tests, packages, and signs all releases across Windows, Linux, and macOS.
+AirMedia includes a fully automated GitHub Actions workflow (`.github/workflows/release.yml`) that compiles, tests, packages, and signs all releases across Windows, Linux, macOS, and Android.
 
 ### Triggering a Production Release
 
@@ -160,7 +214,7 @@ AirMedia includes a fully automated GitHub Actions workflow (`.github/workflows/
    git tag v0.1.0
    git push origin v0.1.0
    ```
-   GitHub Actions will automatically run the parallel build matrix, generate packages for all operating systems and architectures, create the GitHub Release, and attach all archives and consolidated `SHA256SUMS.txt`.
+   GitHub Actions will automatically run the parallel build matrix, generate packages for all operating systems and architectures, create the GitHub Release, and attach all archives, APKs, and consolidated `SHA256SUMS.txt`.
 
 2. **Manual Dispatch (One-Click Release)**:
    - Navigate to **Actions** ➔ **Release** on GitHub.
@@ -176,6 +230,7 @@ AirMedia includes a fully automated GitHub Actions workflow (`.github/workflows/
 | **macOS** | Apple Silicon (arm64) | `airmedia-v<version>-macos-arm64.tar.gz` | Native M1/M2/M3/M4 Apple Silicon build |
 | **macOS** | Intel (x86_64) | `airmedia-v<version>-macos-x64.tar.gz` | Native 64-bit Intel Mac build |
 | **macOS** | Universal | `airmedia-v<version>-macos-universal.tar.gz` | Multi-architecture binary running on any Mac |
+| **Android** | Multi-ABI (Universal) | `airmedia-v<version>-android-universal.apk` | NativeActivity Vulkan GPU player APK |
 | **All** | All | `SHA256SUMS.txt` | Consolidated SHA-256 verification checksums |
 
 ---

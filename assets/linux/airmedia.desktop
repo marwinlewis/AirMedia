@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=AirMedia
+Comment=Ultra-lightweight modern GPU-accelerated media player
+Exec=airmedia %U
+Icon=airmedia
+Terminal=false
+Categories=AudioVideo;Player;Video;Audio;
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;audio/mpeg;audio/flac;audio/ogg;
+StartupNotify=true
+StartupWMClass=airmedia

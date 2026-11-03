@@ -74,6 +74,7 @@ pub fn default_pictures_dir() -> PathBuf {
 
 pub fn create_hidden_command(program: &str) -> Command {
     let resolved = resolve_binary_path(program);
+    #[allow(unused_mut)]
     let mut cmd = Command::new(resolved);
     #[cfg(windows)]
     {
