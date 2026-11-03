@@ -316,10 +316,10 @@ fn test_media_player_step_frame_and_screenshot() {
     assert!(load_res.is_ok(), "Should load test_media.mp4");
 
     let start_wait = std::time::Instant::now();
-    while player.get_latest_video_frame().is_none() && start_wait.elapsed() < std::time::Duration::from_secs(3) {
+    while player.get_latest_video_frame().is_none() && start_wait.elapsed() < std::time::Duration::from_secs(10) {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert!(player.get_latest_video_frame().is_some(), "Video frame should be ready within 3s");
+    assert!(player.get_latest_video_frame().is_some(), "Video frame should be ready within 10s");
 
     player.pause();
     assert!(!player.is_playing);

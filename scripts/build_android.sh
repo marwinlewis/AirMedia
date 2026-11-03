@@ -40,6 +40,17 @@ if ! command -v cargo-ndk &>/dev/null; then
     cargo install cargo-ndk --locked
 fi
 
+# Detect Android NDK path if not already set
+if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+    if [ -n "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME}/ndk" ]; then
+        LATEST_NDK=$(ls -1d "${ANDROID_HOME}/ndk"/* 2>/dev/null | sort -V | tail -n 1)
+        if [ -n "${LATEST_NDK}" ] && [ -d "${LATEST_NDK}" ]; then
+            export ANDROID_NDK_HOME="${LATEST_NDK}"
+            echo "    Auto-detected ANDROID_NDK_HOME: ${ANDROID_NDK_HOME}"
+        fi
+    fi
+fi
+
 # 4. Compile Native cdylib for Supported ABIs
 echo "[3/5] Compiling native Rust shared libraries (.so) via cargo-ndk..."
 JNILIBS_DIR="${PROJECT_ROOT}/android/app/src/main/jniLibs"

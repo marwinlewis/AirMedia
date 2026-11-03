@@ -104,15 +104,16 @@ fn generate_icns(png_frames: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
 
 fn main() {
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let source_icon_path = project_root.join("dist").join("airmedia.png");
+    let candidates = [
+        project_root.join("assets").join("icon.png"),
+        project_root.join("dist").join("airmedia.png"),
+        project_root.join("assets").join("linux").join("airmedia.png"),
+    ];
 
-    if !source_icon_path.exists() {
-        eprintln!(
-            "Source icon not found at: {}",
-            source_icon_path.display()
-        );
-        std::process::exit(1);
-    }
+    let source_icon_path = candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .expect("No source icon found in assets/icon.png or dist/airmedia.png");
 
     println!("Loading source icon from: {}", source_icon_path.display());
     let source_img = image::open(&source_icon_path)
