@@ -10,7 +10,7 @@ use crate::ui::controls::{ControlsCtx, ControlsView};
 use crate::ui::equalizer_dialog::EqualizerDialog;
 use crate::ui::info_dialog::InfoDialog;
 use crate::ui::jump_dialog::JumpDialog;
-use crate::ui::icons::Icon;
+
 use crate::ui::menu_bar::{media_dialog, MenuBarView, MenuCtx, OpenRequest};
 use crate::ui::playlist_view::PlaylistView;
 use crate::ui::preferences_dialog::{PreferencesDialog, PreferencesState};
@@ -61,6 +61,7 @@ pub struct AirMediaApp {
     last_session_json: String,
     /// Window level last sent to the OS, so the command is only sent on change.
     applied_always_on_top: Option<bool>,
+    logo_texture: Option<egui::TextureHandle>,
 }
 
 enum IdleAction {
@@ -120,6 +121,7 @@ impl AirMediaApp {
             last_session_save: Instant::now(),
             last_session_json,
             applied_always_on_top: None,
+            logo_texture: None,
         }
     }
 
@@ -600,6 +602,21 @@ impl AirMediaApp {
 impl eframe::App for AirMediaApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let logo_tex = self
+            .logo_texture
+            .get_or_insert_with(|| {
+                let icon_bytes = include_bytes!("../assets/icon.png");
+                let img = image::load_from_memory(icon_bytes)
+                    .expect("Embedded icon.png must be valid")
+                    .to_rgba8();
+                let (w, h) = img.dimensions();
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [w as usize, h as usize],
+                    &img.into_raw(),
+                );
+                ctx.load_texture("app_logo", color_image, egui::TextureOptions::LINEAR)
+            })
+            .clone();
 
         self.handle_shortcuts(&ctx);
         self.handle_drag_and_drop(&ctx);
@@ -710,7 +727,7 @@ impl eframe::App for AirMediaApp {
                 }
 
                 if !has_media {
-                    idle_action = draw_empty_state(ui, full_rect);
+                    idle_action = draw_empty_state(ui, full_rect, &logo_tex);
                 } else if is_audio_only {
                     ui.painter().text(
                         full_rect.center() + Vec2::new(0.0, 120.0),
@@ -855,7 +872,7 @@ impl eframe::App for AirMediaApp {
             self.open_paths(vec![url], true);
         }
         PreferencesDialog::show(ui, &mut self.player, &mut self.preferences_state, &mut self.show_preferences);
-        AboutDialog::show(ui, &mut self.show_about);
+        AboutDialog::show(ui, &mut self.show_about, &logo_tex);
         ShortcutsDialog::show(ui, &mut self.show_shortcuts);
         let duration = self.player.duration_secs;
         if let Some(t) = JumpDialog::show(ui, &mut self.jump_input, &mut self.show_jump, duration) {
@@ -895,7 +912,9 @@ fn format_clock(secs: f64) -> String {
     }
 }
 
-fn draw_empty_state(ui: &mut Ui, area: Rect) -> Option<IdleAction> {
+
+
+fn draw_empty_state(ui: &mut Ui, area: Rect, logo_tex: &egui::TextureHandle) -> Option<IdleAction> {
     let mut action = None;
     let content = Rect::from_center_size(area.center() - Vec2::new(0.0, 12.0), Vec2::new(380.0, 300.0));
     let mut col = ui.new_child(
@@ -905,9 +924,18 @@ fn draw_empty_state(ui: &mut Ui, area: Rect) -> Option<IdleAction> {
     );
 
     // Logo mark
-    let (logo, _) = col.allocate_exact_size(Vec2::splat(64.0), egui::Sense::hover());
-    col.painter().rect_filled(logo, egui::CornerRadius::same(18), Theme::ACCENT);
-    Icon::Play.paint(col.painter(), logo.shrink(18.0).translate(Vec2::new(2.0, 0.0)), Theme::TEXT);
+    let logo_widget = egui::Image::new(logo_tex)
+        .fit_to_exact_size(Vec2::splat(68.0))
+        .corner_radius(egui::CornerRadius::same(18));
+    let resp = col.add(logo_widget);
+    col.painter().rect_stroke(
+        resp.rect,
+        egui::CornerRadius::same(18),
+        egui::Stroke::new(1.0, Theme::white(25)),
+        Theme::stroke_kind(),
+    );
+
+
 
     col.add_space(18.0);
     col.label(RichText::new("AirMedia").font(Theme::font_semibold(26.0)).color(Theme::TEXT));

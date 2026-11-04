@@ -12,8 +12,8 @@ impl Theme {
     pub const SURFACE: Color32 = Color32::from_rgb(20, 20, 24);
 
     // Accent (used sparingly: progress, selection, primary action)
-    pub const ACCENT: Color32 = Color32::from_rgb(108, 117, 255);
-    pub const ACCENT_SOFT: Color32 = Color32::from_rgb(150, 157, 255);
+    pub const ACCENT: Color32 = Color32::from_rgb(255, 107, 53);
+    pub const ACCENT_SOFT: Color32 = Color32::from_rgb(255, 160, 102);
 
     // Text
     pub const TEXT: Color32 = Color32::from_rgb(244, 244, 245);

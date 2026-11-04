@@ -105,8 +105,8 @@ fn generate_icns(png_frames: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
 fn main() {
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let candidates = [
-        project_root.join("assets").join("icon.png"),
         project_root.join("dist").join("airmedia.png"),
+        project_root.join("assets").join("icon.png"),
         project_root.join("assets").join("linux").join("airmedia.png"),
     ];
 
@@ -251,6 +251,12 @@ fn main() {
         }
         let _ = fs::copy(&play_store_path, android_res_dir.join("ic_launcher-web.png"));
         println!("Mirrored Android icons to {}", android_res_dir.display());
+    }
+
+    let win_dist_dir = project_root.join("dist").join("airmedia-windows-x64");
+    if win_dist_dir.exists() {
+        let _ = fs::copy(&app_icon_path, win_dist_dir.join("icon.png"));
+        println!("Mirrored icon to dist/airmedia-windows-x64/icon.png");
     }
 
     println!("\nAll assets successfully generated from dist/airmedia.png!");
