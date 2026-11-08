@@ -56,7 +56,9 @@ echo "[3/5] Compiling native Rust shared libraries (.so) via cargo-ndk..."
 JNILIBS_DIR="${PROJECT_ROOT}/android/app/src/main/jniLibs"
 mkdir -p "${JNILIBS_DIR}"
 
+# AAudio (linked by cpal) only exists from API 26; cargo-ndk's default platform is older.
 cargo ndk \
+    --platform 26 \
     -t arm64-v8a \
     -t armeabi-v7a \
     -t x86_64 \
