@@ -7,32 +7,39 @@ use std::sync::Arc;
 pub struct Theme;
 
 impl Theme {
-    // Surfaces
-    pub const BG: Color32 = Color32::from_rgb(9, 9, 11);
-    pub const SURFACE: Color32 = Color32::from_rgb(20, 20, 24);
+    // Surfaces matching the warm dark matte aesthetic in the design
+    pub const BG: Color32 = Color32::from_rgb(22, 21, 20); // #161514
+    pub const SURFACE: Color32 = Color32::from_rgb(28, 26, 25); // #1C1A19
+    pub const CAPSULE_BG: Color32 = Color32::from_rgb(17, 16, 15); // #11100F
 
-    // Accent (used sparingly: progress, selection, primary action)
-    pub const ACCENT: Color32 = Color32::from_rgb(255, 107, 53);
-    pub const ACCENT_SOFT: Color32 = Color32::from_rgb(255, 160, 102);
+    // Accent: Warm cream / beige from the play button and progress bar
+    pub const ACCENT: Color32 = Color32::from_rgb(237, 224, 208); // #EDE0D0
+    pub const ACCENT_SOFT: Color32 = Color32::from_rgb(245, 239, 230); // #F5EFE6
+    pub const ACCENT_DARK: Color32 = Color32::from_rgb(24, 22, 20); // #181614
 
     // Text
-    pub const TEXT: Color32 = Color32::from_rgb(244, 244, 245);
-    pub const TEXT_MUTED: Color32 = Color32::from_rgb(161, 161, 170);
-    pub const TEXT_FAINT: Color32 = Color32::from_rgb(113, 113, 122);
+    pub const TEXT: Color32 = Color32::from_rgb(245, 239, 230); // #F5EFE6
+    pub const TEXT_MUTED: Color32 = Color32::from_rgb(163, 155, 145); // #A39B91
+    pub const TEXT_FAINT: Color32 = Color32::from_rgb(112, 106, 99); // #706A63
 
-    // Hairlines
-    pub const BORDER: Color32 = Color32::from_rgba_premultiplied(16, 16, 16, 16);
+    // Hairlines & Tracks
+    pub const BORDER: Color32 = Color32::from_rgb(38, 35, 33); // #262321
+    pub const RAIL_BG: Color32 = Color32::from_rgb(46, 43, 40); // #2E2B28
 
     pub fn radius_sm() -> CornerRadius {
-        CornerRadius::same(6)
+        CornerRadius::same(8)
     }
 
     pub fn radius_md() -> CornerRadius {
-        CornerRadius::same(10)
+        CornerRadius::same(14)
     }
 
     pub fn radius_lg() -> CornerRadius {
-        CornerRadius::same(14)
+        CornerRadius::same(20)
+    }
+
+    pub fn radius_xl() -> CornerRadius {
+        CornerRadius::same(24)
     }
 
     pub fn radius_full() -> CornerRadius {
@@ -58,6 +65,10 @@ impl Theme {
     }
 
     pub fn font_semibold(size: f32) -> FontId {
+        FontId::new(size, FontFamily::Name("semibold".into()))
+    }
+
+    pub fn font_bold(size: f32) -> FontId {
         FontId::new(size, FontFamily::Name("semibold".into()))
     }
 
@@ -94,10 +105,10 @@ fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
 
     // Prefer the native Windows UI font when available; egui's bundled fonts stay as fallback
-    // (they also carry the emoji / symbol glyphs).
     let fonts_dir = std::env::var("WINDIR")
         .map(|w| std::path::PathBuf::from(w).join("Fonts"))
         .unwrap_or_default();
+
     let regular = std::fs::read(fonts_dir.join("segoeui.ttf")).ok();
     let semibold = std::fs::read(fonts_dir.join("seguisb.ttf")).ok();
 
@@ -143,7 +154,7 @@ fn build_style() -> Style {
         (TextStyle::Monospace, FontId::monospace(12.5)),
         (
             TextStyle::Heading,
-            FontId::new(17.0, FontFamily::Name("semibold".into())),
+            FontId::new(18.0, FontFamily::Name("semibold".into())),
         ),
     ]
     .into();
@@ -169,18 +180,18 @@ fn build_style() -> Style {
         offset: [0, 16],
         blur: 40,
         spread: 0,
-        color: Theme::black(140),
+        color: Theme::black(160),
     };
     v.popup_shadow = Shadow {
         offset: [0, 10],
         blur: 28,
         spread: 0,
-        color: Theme::black(120),
+        color: Theme::black(140),
     };
     v.menu_corner_radius = Theme::radius_md();
-    v.extreme_bg_color = Color32::from_rgb(14, 14, 17);
+    v.extreme_bg_color = Theme::CAPSULE_BG;
     v.faint_bg_color = Theme::white(6);
-    v.text_edit_bg_color = Some(Color32::from_rgb(14, 14, 17));
+    v.text_edit_bg_color = Some(Theme::CAPSULE_BG);
     v.hyperlink_color = Theme::ACCENT_SOFT;
     v.override_text_color = None;
     v.slider_trailing_fill = true;
@@ -189,7 +200,7 @@ fn build_style() -> Style {
     v.striped = false;
 
     v.selection.bg_fill = Theme::ACCENT;
-    v.selection.stroke = Stroke::new(1.0, Theme::TEXT);
+    v.selection.stroke = Stroke::new(1.0, Theme::ACCENT_DARK);
 
     let radius = Theme::radius_sm();
     let w = &mut v.widgets;
@@ -200,14 +211,14 @@ fn build_style() -> Style {
     w.noninteractive.fg_stroke = Stroke::new(1.0, Theme::TEXT_MUTED);
     w.noninteractive.corner_radius = radius;
 
-    w.inactive.bg_fill = Theme::white(22);
+    w.inactive.bg_fill = Theme::white(20);
     w.inactive.weak_bg_fill = Theme::white(10);
     w.inactive.bg_stroke = Stroke::NONE;
     w.inactive.fg_stroke = Stroke::new(1.0, Theme::TEXT);
     w.inactive.corner_radius = radius;
     w.inactive.expansion = 0.0;
 
-    w.hovered.bg_fill = Theme::white(36);
+    w.hovered.bg_fill = Theme::white(34);
     w.hovered.weak_bg_fill = Theme::white(18);
     w.hovered.bg_stroke = Stroke::NONE;
     w.hovered.fg_stroke = Stroke::new(1.5, Theme::TEXT);

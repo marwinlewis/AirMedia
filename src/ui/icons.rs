@@ -31,6 +31,7 @@ pub enum Icon {
     Repeat,
     Search,
     Trash,
+    More,
 }
 
 impl Icon {
@@ -49,7 +50,7 @@ impl Icon {
         };
 
         match self {
-            Icon::Play => poly(vec![p(7.0, 4.5), p(19.5, 12.0), p(7.0, 19.5)]),
+            Icon::Play => poly(vec![p(7.5, 4.5), p(19.5, 12.0), p(7.5, 19.5)]),
             Icon::Pause => {
                 let r = egui::CornerRadius::same((1.2 * u) as u8);
                 painter.rect_filled(Rect::from_min_max(p(6.5, 5.0), p(10.0, 19.0)), r, color);
@@ -72,25 +73,21 @@ impl Icon {
                 );
             }
             Icon::StepForward => {
-                // Outer film frame
                 painter.rect_stroke(
                     Rect::from_min_max(p(3.5, 5.5), p(20.5, 18.5)),
                     egui::CornerRadius::same((2.0 * u) as u8),
                     Stroke::new(1.4 * u, color),
                     egui::StrokeKind::Middle,
                 );
-                // Step arrow inside
                 poly(vec![p(9.5, 8.5), p(9.5, 15.5), p(15.5, 12.0)]);
             }
             Icon::StepBackward => {
-                // Outer film frame
                 painter.rect_stroke(
                     Rect::from_min_max(p(3.5, 5.5), p(20.5, 18.5)),
                     egui::CornerRadius::same((2.0 * u) as u8),
                     Stroke::new(1.4 * u, color),
                     egui::StrokeKind::Middle,
                 );
-                // Step arrow inside
                 poly(vec![p(14.5, 8.5), p(14.5, 15.5), p(8.5, 12.0)]);
             }
             Icon::VolumeHigh | Icon::VolumeLow | Icon::VolumeMute => {
@@ -121,10 +118,9 @@ impl Icon {
                 open_path(vec![p(9.0, 20.0), p(9.0, 15.0), p(4.0, 15.0)]);
             }
             Icon::Playlist => {
-                line(p(4.0, 6.0), p(16.0, 6.0));
-                line(p(4.0, 11.0), p(16.0, 11.0));
-                line(p(4.0, 16.0), p(11.0, 16.0));
-                poly(vec![p(14.5, 13.5), p(20.5, 17.0), p(14.5, 20.5)]);
+                line(p(4.0, 7.0), p(20.0, 7.0));
+                line(p(4.0, 12.0), p(16.0, 12.0));
+                line(p(4.0, 17.0), p(12.0, 17.0));
             }
             Icon::Subtitles => {
                 painter.rect_stroke(
@@ -144,18 +140,14 @@ impl Icon {
                 }
             }
             Icon::Camera => {
-                // Camera body
                 painter.rect_stroke(
                     Rect::from_min_max(p(3.0, 7.5), p(21.0, 19.5)),
                     egui::CornerRadius::same((2.0 * u) as u8),
                     stroke,
                     egui::StrokeKind::Middle,
                 );
-                // Camera top viewfinder bump
                 open_path(vec![p(8.0, 7.5), p(9.5, 5.0), p(14.5, 5.0), p(16.0, 7.5)]);
-                // Lens
                 painter.circle_stroke(p(12.0, 13.5), 3.6 * u, stroke);
-                // Flash dot
                 painter.circle_filled(p(18.0, 10.0), 0.9 * u, color);
             }
             Icon::Menu => {
@@ -184,13 +176,19 @@ impl Icon {
                 open_path(vec![p(7.5, 14.0), p(5.0, 16.5), p(7.5, 19.0)]);
             }
             Icon::Search => {
-                painter.circle_stroke(p(10.5, 10.5), 6.0 * u, stroke);
-                line(p(15.0, 15.0), p(20.0, 20.0));
+                painter.circle_stroke(p(10.5, 10.5), 5.5 * u, stroke);
+                line(p(14.5, 14.5), p(19.5, 19.5));
             }
             Icon::Trash => {
                 line(p(4.0, 6.5), p(20.0, 6.5));
                 open_path(vec![p(9.0, 6.5), p(9.5, 4.0), p(14.5, 4.0), p(15.0, 6.5)]);
                 open_path(vec![p(6.0, 6.5), p(7.0, 20.0), p(17.0, 20.0), p(18.0, 6.5)]);
+            }
+            Icon::More => {
+                let r = 1.6 * u;
+                painter.circle_filled(p(6.0, 12.0), r, color);
+                painter.circle_filled(p(12.0, 12.0), r, color);
+                painter.circle_filled(p(18.0, 12.0), r, color);
             }
         }
     }
@@ -219,16 +217,51 @@ pub fn icon_button_ex(ui: &mut Ui, icon: Icon, size: f32, active: bool) -> Respo
         let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
         let painter = ui.painter();
         if hover > 0.0 {
-            painter.circle_filled(rect.center(), size * 0.5, Theme::white((22.0 * hover) as u8));
+            painter.circle_filled(rect.center(), size * 0.5, Theme::white((26.0 * hover) as u8));
         }
         let color = if active {
-            Theme::ACCENT_SOFT
+            Theme::ACCENT
         } else {
-            lerp_color(Theme::white(215), Theme::TEXT, hover)
+            lerp_color(Theme::TEXT_MUTED, Theme::TEXT, hover)
         };
         let pressed = if resp.is_pointer_button_down_on() { 0.92 } else { 1.0 };
-        let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(size * 0.58 * pressed));
+        let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(size * 0.55 * pressed));
         icon.paint(painter, icon_rect, color);
+    }
+    resp
+}
+
+/// A primary prominent circle button, like the Play/Pause button in the design:
+/// Filled with filled_color, icon drawn in icon_color.
+pub fn primary_circle_button(ui: &mut Ui, icon: Icon, size: f32, fill_color: Color32, icon_color: Color32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+        let painter = ui.painter();
+        let pressed = if resp.is_pointer_button_down_on() { 0.94 } else { 1.0 };
+        let radius = size * 0.5 * pressed;
+
+        let bg = if hover > 0.0 {
+            lerp_color(fill_color, Color32::WHITE, hover * 0.15)
+        } else {
+            fill_color
+        };
+        painter.circle_filled(rect.center(), radius, bg);
+
+        // Subtle shadow / depth ring
+        painter.circle_stroke(
+            rect.center(),
+            radius,
+            Stroke::new(1.0, Theme::black(30)),
+        );
+
+        // Center the icon (adjusting play icon slightly for optical centering)
+        let mut icon_center = rect.center();
+        if icon == Icon::Play {
+            icon_center.x += 1.8 * (size / 58.0);
+        }
+        let icon_rect = Rect::from_center_size(icon_center, Vec2::splat(size * 0.44 * pressed));
+        icon.paint(painter, icon_rect, icon_color);
     }
     resp
 }

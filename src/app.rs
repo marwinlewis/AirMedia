@@ -62,11 +62,8 @@ pub struct AirMediaApp {
     /// Window level last sent to the OS, so the command is only sent on change.
     applied_always_on_top: Option<bool>,
     logo_texture: Option<egui::TextureHandle>,
-}
-
-enum IdleAction {
-    OpenFile,
-    OpenStream,
+    cover_texture: Option<egui::TextureHandle>,
+    local_cover_texture: Option<(PathBuf, egui::TextureHandle)>,
 }
 
 impl AirMediaApp {
@@ -122,10 +119,43 @@ impl AirMediaApp {
             last_session_json,
             applied_always_on_top: None,
             logo_texture: None,
+            cover_texture: None,
+            local_cover_texture: None,
         }
     }
 
-    pub fn set_toast(&mut self, msg: impl Into<String>) {
+        fn get_active_cover(&mut self, ctx: &egui::Context, default_cover: &egui::TextureHandle) -> egui::TextureHandle {
+        if let Some(media_path) = &self.player.current_file {
+            if let Some(parent) = media_path.parent() {
+                if let Some((cached_path, tex)) = &self.local_cover_texture {
+                    if cached_path == media_path {
+                        return tex.clone();
+                    }
+                }
+                for name in &["cover.png", "cover.jpg", "folder.jpg", "album.jpg", "front.jpg"] {
+                    let p = parent.join(name);
+                    if p.exists() {
+                        if let Ok(bytes) = std::fs::read(&p) {
+                            if let Ok(img) = image::load_from_memory(&bytes) {
+                                let rgba = img.to_rgba8();
+                                let (w, h) = rgba.dimensions();
+                                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                                    [w as usize, h as usize],
+                                    &rgba.into_raw(),
+                                );
+                                let tex = ctx.load_texture("local_cover", color_image, egui::TextureOptions::LINEAR);
+                                self.local_cover_texture = Some((media_path.clone(), tex.clone()));
+                                return tex;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        default_cover.clone()
+    }
+
+pub fn set_toast(&mut self, msg: impl Into<String>) {
         self.toast = Some((msg.into(), Instant::now(), 1.4));
     }
 
@@ -676,94 +706,105 @@ impl eframe::App for AirMediaApp {
             self.applied_always_on_top = Some(on_top);
         }
 
-        let title = self
-            .playlist
-            .current_item()
-            .map(|i| i.title.clone())
-            .unwrap_or_default();
-        if title != self.window_title {
-            let window_title = if title.is_empty() {
+        let (track_title, track_artist) = if let Some(item) = self.playlist.current_item() {
+            let t = self
+                .player
+                .media_info
+                .as_ref()
+                .and_then(|m| m.title())
+                .unwrap_or_else(|| item.title.clone());
+            let a = self
+                .player
+                .media_info
+                .as_ref()
+                .and_then(|m| m.artist())
+                .unwrap_or_else(|| "AirMedia".to_string());
+            (t, a)
+        } else {
+            ("Lif's Story".to_string(), "Nordafjoil".to_string())
+        };
+
+        if track_title != self.window_title {
+            let window_title = if self.playlist.current_item().is_none() {
                 "AirMedia".to_string()
             } else {
-                format!("{title} — AirMedia")
+                format!("{track_title} — AirMedia")
             };
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title));
-            self.window_title = title.clone();
+            self.window_title = track_title.clone();
         }
 
-        let mut idle_action = None;
+        let cover_tex = self
+            .cover_texture
+            .get_or_insert_with(|| {
+                let cover_bytes = include_bytes!("../assets/cover.png");
+                let img = image::load_from_memory(cover_bytes)
+                    .expect("Embedded cover.png must be valid")
+                    .to_rgba8();
+                let (w, h) = img.dimensions();
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(
+                    [w as usize, h as usize],
+                    &img.into_raw(),
+                );
+                ctx.load_texture("default_cover", color_image, egui::TextureOptions::LINEAR)
+            })
+            .clone();
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Theme::BG))
             .show(ui, |ui| {
-                // Playlist drawer docks to the right; the video takes the rest.
+                // Playlist drawer docks to the right; the card takes the rest.
                 PlaylistView::show(ui, &mut self.playlist, &mut self.player, &mut self.show_playlist);
 
                 let full_rect = ui.available_rect_before_wrap();
 
-                let canvas_resp = self.canvas.show(
-                    ui,
-                    active_subtitle.as_deref(),
-                    self.preferences_state.subtitle_size,
-                    is_audio_only,
-                    &visualizer_levels,
-                );
-
-                if has_media && canvas_resp.double_clicked() {
-                    self.toggle_fullscreen(&ctx);
-                } else if has_media && canvas_resp.clicked() {
-                    self.player.toggle_play();
-                }
-
-                // Wheel over the video adjusts volume.
-                if canvas_resp.hovered() && !Popup::is_any_open(&ctx) {
-                    let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-                    if scroll.abs() > 2.0 {
-                        let delta = if scroll > 0.0 { 0.05 } else { -0.05 };
-                        let new_vol = (self.player.get_volume() + delta).clamp(0.0, 1.5);
-                        self.player.set_volume(new_vol);
-                        self.set_toast(format!("Volume {}%", (new_vol * 100.0).round() as u32));
-                    }
-                }
-
-                if !has_media {
-                    idle_action = draw_empty_state(ui, full_rect, &logo_tex);
-                } else if is_audio_only {
-                    ui.painter().text(
-                        full_rect.center() + Vec2::new(0.0, 120.0),
-                        Align2::CENTER_CENTER,
-                        &title,
-                        Theme::font_semibold(16.0),
-                        Theme::TEXT_MUTED,
+                // If in fullscreen and video is playing, fill screen with video
+                if self.is_fullscreen && !is_audio_only && self.canvas.texture.is_some() {
+                    let canvas_resp = self.canvas.show_in_rect(
+                        ui,
+                        full_rect,
+                        active_subtitle.as_deref(),
+                        self.preferences_state.subtitle_size,
+                        false,
+                        &visualizer_levels,
+                        None,
                     );
-                }
+                    if canvas_resp.double_clicked() {
+                        self.toggle_fullscreen(&ctx);
+                    } else if canvas_resp.clicked() {
+                        self.player.toggle_play();
+                    }
+                    if canvas_resp.hovered() && !Popup::is_any_open(&ctx) {
+                        let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
+                        if scroll.abs() > 2.0 {
+                            let delta = if scroll > 0.0 { 0.05 } else { -0.05 };
+                            let new_vol = (self.player.get_volume() + delta).clamp(0.0, 1.5);
+                            self.player.set_volume(new_vol);
+                            self.set_toast(format!("Volume {}%", (new_vol * 100.0).round() as u32));
+                        }
+                    }
+                } else {
+                    // Center the player card inside the window
+                    let max_card_w = 420.0;
+                    let card_w = full_rect.width().min(max_card_w);
+                    let card_x = full_rect.center().x - card_w / 2.0;
+                    let card_rect = Rect::from_min_size(
+                        Pos2::new(card_x, full_rect.min.y),
+                        Vec2::new(card_w, full_rect.height()),
+                    );
 
-                // Overlay chrome (top bar + bottom controls), fading with mouse activity.
-                let timeout = Duration::from_secs_f32(self.preferences_state.auto_hide_seconds);
-                let recently_active = self.last_mouse_activity.elapsed() < timeout;
-                let pointer_in_window = current_pointer.is_some_and(|p| full_rect.contains(p));
-                let keep_visible = !self.player.is_playing
-                    || self.controls.is_seeking
-                    || Popup::is_any_open(&ctx)
-                    || (recently_active && pointer_in_window);
-                let chrome_alpha =
-                    ctx.animate_bool_with_time(egui::Id::unique("chrome_alpha"), keep_visible, 0.25);
+                    // 1. Top Bar
+                    let top_resp = TopBarView::show(ui, card_rect, &self.player, &track_title);
+                    if top_resp.search_clicked {
+                        self.show_playlist = true;
+                    }
 
-                if chrome_alpha <= 0.0 && pointer_in_window {
-                    ctx.set_cursor_icon(egui::CursorIcon::None);
-                }
-
-                if chrome_alpha > 0.0 {
-                    let mut overlay = ui.new_child(egui::UiBuilder::new().max_rect(full_rect));
-                    overlay.multiply_opacity(chrome_alpha);
-
-                    let menu_resp = TopBarView::show(&mut overlay, full_rect, &self.player, &title);
                     let mut menu_toast = None;
                     let mut toggle_fs = false;
                     let mut open_request: Option<OpenRequest> = None;
                     let mut open_jump = false;
                     let mut always_on_top = self.preferences_state.always_on_top;
-                    Popup::menu(&menu_resp)
+                    Popup::menu(&top_resp.menu_response)
                         .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
                         .gap(6.0)
                         .show(|ui| {
@@ -793,33 +834,112 @@ impl eframe::App for AirMediaApp {
                             );
                         });
 
-                    if has_media {
-                        let mut controls_toast = None;
-                        let hovering_controls = self.controls.show(
-                            &mut overlay,
-                            full_rect,
-                            &mut self.player,
-                            &mut self.playlist,
-                            ControlsCtx {
-                                aspect_mode: &mut self.canvas.aspect_mode,
-                                show_playlist: &mut self.show_playlist,
-                                show_info: &mut self.show_info,
-                                show_preferences: &mut self.show_preferences,
-                                is_fullscreen: self.is_fullscreen,
-                                toggle_fullscreen: &mut toggle_fs,
-                                toast_msg: &mut controls_toast,
-                                prefs: &mut self.preferences_state,
-                                ab_loop: self.ab_loop,
-                            },
-                        );
-                        if let Some(t) = controls_toast {
-                            self.set_toast(t);
-                        }
-                        if hovering_controls {
-                            self.last_mouse_activity = Instant::now();
+                    // 2. Artwork
+                    let pad_x = 24.0;
+                    let art_w = card_w - pad_x * 2.0;
+                    let art_h = (art_w * 0.95).min((card_rect.height() - 250.0).max(180.0));
+                    let y_art = card_rect.min.y + 52.0;
+                    let art_rect = Rect::from_min_size(
+                        Pos2::new(card_rect.min.x + pad_x, y_art),
+                        Vec2::new(art_w, art_h),
+                    );
+
+                    let active_cover = self.get_active_cover(&ctx, &cover_tex);
+                    let canvas_resp = self.canvas.show_in_rect(
+                        ui,
+                        art_rect,
+                        active_subtitle.as_deref(),
+                        self.preferences_state.subtitle_size,
+                        is_audio_only,
+                        &visualizer_levels,
+                        Some(&active_cover),
+                    );
+
+                    if canvas_resp.double_clicked() {
+                        self.toggle_fullscreen(&ctx);
+                    } else if canvas_resp.clicked() {
+                        if has_media {
+                            self.player.toggle_play();
+                        } else {
+                            self.open_file_dialog();
                         }
                     }
 
+                    // Mouse wheel adjusts volume
+                    if canvas_resp.hovered() && !Popup::is_any_open(&ctx) {
+                        let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
+                        if scroll.abs() > 2.0 {
+                            let delta = if scroll > 0.0 { 0.05 } else { -0.05 };
+                            let new_vol = (self.player.get_volume() + delta).clamp(0.0, 1.5);
+                            self.player.set_volume(new_vol);
+                            self.set_toast(format!("Volume {}%", (new_vol * 100.0).round() as u32));
+                        }
+                    }
+
+                    // 3. Track Info (Title and Artist)
+                    let y_info = art_rect.max.y + 14.0;
+                    let info_rect = Rect::from_min_size(
+                        Pos2::new(card_rect.min.x + pad_x, y_info),
+                        Vec2::new(art_w, 48.0),
+                    );
+                    let mut info_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(info_rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    info_ui.add(
+                        egui::Label::new(
+                            RichText::new(&track_title)
+                                .font(Theme::font_bold(22.0))
+                                .color(Theme::TEXT),
+                        )
+                        .truncate()
+                        .selectable(false),
+                    );
+                    info_ui.add_space(2.0);
+                    info_ui.add(
+                        egui::Label::new(
+                            RichText::new(&track_artist)
+                                .font(Theme::font(14.5))
+                                .color(Theme::TEXT_MUTED),
+                        )
+                        .truncate()
+                        .selectable(false),
+                    );
+
+                    // 4. Controls Area (Seek bar, Timers, Transport buttons, Playlist pill)
+                    let y_ctrls = info_rect.max.y + 10.0;
+                    let ctrls_rect = Rect::from_min_size(
+                        Pos2::new(card_rect.min.x, y_ctrls),
+                        Vec2::new(card_w, (card_rect.max.y - y_ctrls).max(180.0)),
+                    );
+
+                    let mut controls_toast = None;
+                    let hovering_controls = self.controls.show(
+                        ui,
+                        ctrls_rect,
+                        &mut self.player,
+                        &mut self.playlist,
+                        ControlsCtx {
+                            aspect_mode: &mut self.canvas.aspect_mode,
+                            show_playlist: &mut self.show_playlist,
+                            show_info: &mut self.show_info,
+                            show_preferences: &mut self.show_preferences,
+                            show_equalizer: &mut self.show_equalizer,
+                            is_fullscreen: self.is_fullscreen,
+                            toggle_fullscreen: &mut toggle_fs,
+                            toast_msg: &mut controls_toast,
+                            prefs: &mut self.preferences_state,
+                            ab_loop: self.ab_loop,
+                        },
+                    );
+
+                    if let Some(t) = controls_toast {
+                        self.set_toast(t);
+                    }
+                    if hovering_controls {
+                        self.last_mouse_activity = Instant::now();
+                    }
                     if let Some(t) = menu_toast {
                         self.set_toast(t);
                     }
@@ -852,12 +972,6 @@ impl eframe::App for AirMediaApp {
                     draw_drag_overlay(ui, full_rect);
                 }
             });
-
-        match idle_action {
-            Some(IdleAction::OpenFile) => self.open_file_dialog(),
-            Some(IdleAction::OpenStream) => self.show_stream = true,
-            None => {}
-        }
 
         // Dialogs
         InfoDialog::show(ui, &self.player, &mut self.show_info);
@@ -913,91 +1027,6 @@ fn format_clock(secs: f64) -> String {
 }
 
 
-
-fn draw_empty_state(ui: &mut Ui, area: Rect, logo_tex: &egui::TextureHandle) -> Option<IdleAction> {
-    let mut action = None;
-    let content = Rect::from_center_size(area.center() - Vec2::new(0.0, 12.0), Vec2::new(380.0, 300.0));
-    let mut col = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(content)
-            .layout(egui::Layout::top_down(egui::Align::Center)),
-    );
-
-    // Logo mark
-    let logo_widget = egui::Image::new(logo_tex)
-        .fit_to_exact_size(Vec2::splat(68.0))
-        .corner_radius(egui::CornerRadius::same(18));
-    let resp = col.add(logo_widget);
-    col.painter().rect_stroke(
-        resp.rect,
-        egui::CornerRadius::same(18),
-        egui::Stroke::new(1.0, Theme::white(25)),
-        Theme::stroke_kind(),
-    );
-
-
-
-    col.add_space(18.0);
-    col.label(RichText::new("AirMedia").font(Theme::font_semibold(26.0)).color(Theme::TEXT));
-    col.add_space(2.0);
-    col.label(RichText::new("Drop a file anywhere to start playing").size(14.0).color(Theme::TEXT_MUTED));
-    col.add_space(22.0);
-
-    // Center the two buttons as a group.
-    let btn_w = 132.0;
-    let gap = 10.0;
-    let (row_rect, _) = col.allocate_exact_size(Vec2::new(btn_w * 2.0 + gap, 38.0), egui::Sense::hover());
-    let mut row = col.new_child(
-        egui::UiBuilder::new()
-            .max_rect(row_rect)
-            .layout(egui::Layout::left_to_right(egui::Align::Center)),
-    );
-    row.spacing_mut().item_spacing.x = gap;
-    let primary = egui::Button::new(RichText::new("Open file").font(Theme::font_semibold(14.0)).color(Theme::TEXT))
-        .fill(Theme::ACCENT)
-        .corner_radius(Theme::radius_md())
-        .min_size(Vec2::new(btn_w, 38.0));
-    if row.add(primary).clicked() {
-        action = Some(IdleAction::OpenFile);
-    }
-    let secondary = egui::Button::new(RichText::new("Open stream").size(14.0).color(Theme::TEXT))
-        .fill(Theme::white(14))
-        .corner_radius(Theme::radius_md())
-        .min_size(Vec2::new(btn_w, 38.0));
-    if row.add(secondary).clicked() {
-        action = Some(IdleAction::OpenStream);
-    }
-
-    col.add_space(26.0);
-    let mut job = egui::text::LayoutJob::default();
-    for (i, (keys, what)) in crate::shortcuts::hints().enumerate() {
-        let key = keys.split(" or ").next().unwrap_or(keys);
-        if i > 0 {
-            job.append("      ", 0.0, egui::TextFormat::default());
-        }
-        job.append(
-            key,
-            0.0,
-            egui::TextFormat {
-                font_id: Theme::font_semibold(12.0),
-                color: Theme::TEXT_MUTED,
-                ..Default::default()
-            },
-        );
-        job.append(
-            &format!("  {what}"),
-            0.0,
-            egui::TextFormat {
-                font_id: Theme::font(12.0),
-                color: Theme::TEXT_FAINT,
-                ..Default::default()
-            },
-        );
-    }
-    col.label(job);
-
-    action
-}
 
 fn draw_toast_hud(ui: &mut Ui, center: Pos2, text: &str, alpha: f32) {
     let mut painter = ui

@@ -1,7 +1,7 @@
 use super::theme::Theme;
 use crate::media::decoder::VideoFrame;
 use eframe::egui::{
-    self, Color32, FontFamily, FontId, Pos2, Rect, Response, Sense, Ui, Vec2,
+    self, Color32, FontFamily, FontId, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -92,22 +92,24 @@ impl VideoCanvas {
         }
     }
 
-    pub fn show(
+    /// Renders the artwork/video container inside a specified `rect`:
+    /// - If video is playing, renders video frame in `rect`
+    /// - If audio or idle, renders the album cover / mountain artwork with rounded corners
+    pub fn show_in_rect(
         &mut self,
         ui: &mut Ui,
+        rect: Rect,
         subtitle_text: Option<&str>,
         subtitle_size: f32,
         is_audio_only: bool,
         visualizer_levels: &[f32; 16],
+        cover_texture: Option<&egui::TextureHandle>,
     ) -> Response {
-        let available_size = ui.available_size();
-        let (rect, response) =
-            ui.allocate_exact_size(available_size, Sense::click_and_drag());
-
+        let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
 
-        // Fill background
-        painter.rect_filled(rect, egui::CornerRadius::ZERO, Theme::BG);
+        // Fill background container
+        painter.rect_filled(rect, Theme::radius_lg(), Theme::SURFACE);
 
         if let (Some(tex), false) = (&self.texture, is_audio_only) {
             let (frame_w, frame_h) = self.last_frame_dims.unwrap_or((1920, 1080));
@@ -118,18 +120,59 @@ impl VideoCanvas {
                 self.aspect_mode,
             );
 
-            // Render texture with GPU filtering
+            // Render video texture
             let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
             painter.image(tex.id(), target_rect, uv, Color32::WHITE);
+        } else if let Some(cover_tex) = cover_texture {
+            // Render the cover artwork matching the design
+            let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+            painter.image(cover_tex.id(), rect, uv, Color32::WHITE);
+
+            // If audio is actively playing, draw subtle audio visualizer glow on bottom
+            if is_audio_only {
+                let any_sound = visualizer_levels.iter().any(|&l| l > 0.02);
+                if any_sound {
+                    draw_audio_wave_overlay(&painter, rect, visualizer_levels);
+                }
+            }
         } else {
             draw_idle_or_audio_canvas(&painter, rect, is_audio_only, visualizer_levels);
         }
+
+        // Draw elegant rounded border
+        painter.rect_stroke(
+            rect,
+            Theme::radius_lg(),
+            Stroke::new(1.0, Theme::BORDER),
+            Theme::stroke_kind(),
+        );
 
         if let Some(sub) = subtitle_text {
             draw_subtitle_overlay(&painter, rect, sub, subtitle_size);
         }
 
         response
+    }
+
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        subtitle_text: Option<&str>,
+        subtitle_size: f32,
+        is_audio_only: bool,
+        visualizer_levels: &[f32; 16],
+    ) -> Response {
+        let available_size = ui.available_size();
+        let (rect, _) = ui.allocate_exact_size(available_size, Sense::hover());
+        self.show_in_rect(
+            ui,
+            rect,
+            subtitle_text,
+            subtitle_size,
+            is_audio_only,
+            visualizer_levels,
+            None,
+        )
     }
 }
 
@@ -180,6 +223,26 @@ fn compute_target_rect(
     }
 }
 
+fn draw_audio_wave_overlay(painter: &egui::Painter, rect: Rect, levels: &[f32; 16]) {
+    let n = levels.len();
+    let bar_w = 4.0;
+    let gap = 3.0;
+    let total_w = n as f32 * bar_w + (n as f32 - 1.0) * gap;
+    let start_x = rect.center().x - total_w / 2.0;
+    let bottom_y = rect.max.y - 14.0;
+
+    for (i, &lvl) in levels.iter().enumerate() {
+        let h = (lvl * 36.0).clamp(2.0, 32.0);
+        let x = start_x + i as f32 * (bar_w + gap);
+        let bar = Rect::from_min_max(
+            Pos2::new(x, bottom_y - h),
+            Pos2::new(x + bar_w, bottom_y),
+        );
+        let color = Color32::from_rgba_premultiplied(237, 224, 208, 180);
+        painter.rect_filled(bar, Theme::radius_full(), color);
+    }
+}
+
 fn draw_subtitle_overlay(painter: &egui::Painter, canvas_rect: Rect, text: &str, font_size: f32) {
     if text.trim().is_empty() {
         return;
@@ -196,7 +259,6 @@ fn draw_subtitle_overlay(painter: &egui::Painter, canvas_rect: Rect, text: &str,
     let bg = Rect::from_min_size(Pos2::new(canvas_rect.center().x - size.x / 2.0, bottom - size.y), size);
 
     painter.rect_filled(bg, Theme::radius_sm(), Theme::black(150));
-    // With centered halign the galley is laid out around x = 0, so anchor it at the box center.
     painter.galley(Pos2::new(bg.center().x, bg.min.y + pad.y), galley, Color32::WHITE);
 }
 
@@ -207,7 +269,6 @@ fn draw_idle_or_audio_canvas(
     levels: &[f32; 16],
 ) {
     if !is_audio {
-        // The empty state (logo + actions) is drawn by the app on top of the canvas.
         return;
     }
 

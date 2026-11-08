@@ -134,6 +134,35 @@ impl MediaInfo {
         self.streams.iter().filter(|s| s.codec_type == "subtitle").collect()
     }
 
+    pub fn title(&self) -> Option<String> {
+        let tags = self.format.tags.as_ref()?;
+        tags.get("title")
+            .or_else(|| tags.get("TITLE"))
+            .or_else(|| tags.get("Title"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    pub fn artist(&self) -> Option<String> {
+        let tags = self.format.tags.as_ref()?;
+        tags.get("artist")
+            .or_else(|| tags.get("ARTIST"))
+            .or_else(|| tags.get("Artist"))
+            .or_else(|| tags.get("album_artist"))
+            .or_else(|| tags.get("ALBUM_ARTIST"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
+    pub fn album(&self) -> Option<String> {
+        let tags = self.format.tags.as_ref()?;
+        tags.get("album")
+            .or_else(|| tags.get("ALBUM"))
+            .or_else(|| tags.get("Album"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    }
+
     /// Rejects media whose metadata would make the player misbehave (absurd frame sizes, or
     /// nothing playable at all).
     pub fn validate(&self) -> Result<(), String> {
