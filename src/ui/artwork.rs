@@ -49,9 +49,7 @@ pub struct ArtMeta {
 impl ArtMeta {
     fn from_probe(info: &MediaInfo) -> Self {
         let video = info.primary_video_stream();
-        // Embedded album art counts as a "video" stream, so judge by the codec's frame count.
-        let is_cover_art = video.is_some_and(|v| matches!(v.codec_name.as_deref(), Some("mjpeg" | "png" | "bmp")));
-        let audio_only = video.is_none() || (is_cover_art && !info.audio_streams().is_empty());
+        let audio_only = video.is_none();
         Self {
             duration_secs: info.duration_seconds(),
             height: if audio_only { 0 } else { info.video_dimensions().map_or(0, |(_, h)| h) },

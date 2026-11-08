@@ -227,6 +227,50 @@ fn test_media_info_dimension_limits_and_rotation() {
 }
 
 #[test]
+fn test_embedded_cover_art_is_not_video() {
+    use airmedia::media::probe::MediaInfo;
+
+    // An MP3 with album art: ffprobe lists the picture as a video stream.
+    let song: MediaInfo = serde_json::from_str(
+        r#"{"streams":[{"index":0,"codec_type":"audio","codec_name":"mp3"},
+            {"index":1,"codec_type":"video","codec_name":"mjpeg","width":600,"height":600,
+             "disposition":{"default":0,"attached_pic":1}}],"format":{}}"#,
+    )
+    .unwrap();
+    assert!(song.validate().is_ok());
+    assert!(song.primary_video_stream().is_none());
+    assert_eq!(song.video_dimensions(), None);
+
+    // Real video wins even when the cover comes first in the file.
+    let movie: MediaInfo = serde_json::from_str(
+        r#"{"streams":[{"index":0,"codec_type":"video","codec_name":"png","width":600,"height":600,
+             "disposition":{"attached_pic":1}},
+            {"index":1,"codec_type":"video","codec_name":"h264","width":1280,"height":720,
+             "disposition":{"attached_pic":0}},
+            {"index":2,"codec_type":"audio","codec_name":"aac"}],"format":{}}"#,
+    )
+    .unwrap();
+    assert_eq!(movie.video_dimensions(), Some((1280, 720)));
+
+    // Motion JPEG is real video when it isn't flagged as a picture.
+    let mjpeg: MediaInfo = serde_json::from_str(
+        r#"{"streams":[{"index":0,"codec_type":"video","codec_name":"mjpeg","width":640,"height":480,
+             "disposition":{"attached_pic":0}},
+            {"index":1,"codec_type":"audio","codec_name":"pcm_s16le"}],"format":{}}"#,
+    )
+    .unwrap();
+    assert_eq!(mjpeg.video_dimensions(), Some((640, 480)));
+
+    // A picture with no audio has nothing to play.
+    let picture_only: MediaInfo = serde_json::from_str(
+        r#"{"streams":[{"index":0,"codec_type":"video","codec_name":"mjpeg",
+             "disposition":{"attached_pic":1}}],"format":{}}"#,
+    )
+    .unwrap();
+    assert!(picture_only.validate().is_err());
+}
+
+#[test]
 fn test_probe_refuses_network_access_from_local_manifest() {
     use airmedia::media::check_dependencies;
     use airmedia::media::probe::MediaInfo;

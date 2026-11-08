@@ -60,6 +60,15 @@ pub struct StreamInfo {
     pub tags: Option<serde_json::Value>,
     #[serde(default)]
     pub side_data_list: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub disposition: Disposition,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Disposition {
+    /// ffprobe's 0/1 flag: this "video" stream is really a still picture, e.g. embedded album art.
+    #[serde(default)]
+    pub attached_pic: u8,
 }
 
 impl StreamInfo {
@@ -122,8 +131,9 @@ impl MediaInfo {
         0.0
     }
 
+    /// The stream to play as video. Embedded cover art is listed as a video stream but isn't one.
     pub fn primary_video_stream(&self) -> Option<&StreamInfo> {
-        self.streams.iter().find(|s| s.codec_type == "video")
+        self.streams.iter().find(|s| s.codec_type == "video" && s.disposition.attached_pic == 0)
     }
 
     pub fn audio_streams(&self) -> Vec<&StreamInfo> {
