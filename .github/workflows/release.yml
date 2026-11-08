@@ -182,6 +182,25 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
 
+      # build_android.sh runs `cargo run --example generate_assets` on the host first, which
+      # compiles the crate for x86_64-linux (cpal -> alsa-sys etc.), so host system libs are needed.
+      - name: Install Linux host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev \
+            libudev-dev \
+            pkg-config \
+            libx11-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libssl-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev
+
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
 
