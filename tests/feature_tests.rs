@@ -505,3 +505,148 @@ fn test_readme_shortcut_table_matches_source() {
     let hints: Vec<_> = airmedia::shortcuts::hints().collect();
     assert!(hints.iter().any(|(k, _)| k.contains("F1")), "empty state advertises the help overlay");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Library
+// ---------------------------------------------------------------------------------------------
+
+fn lib_paths(names: &[&str]) -> Vec<PathBuf> {
+    names.iter().map(PathBuf::from).collect()
+}
+
+#[test]
+fn display_title_cleans_file_names() {
+    use airmedia::library::display_title;
+    assert_eq!(display_title(Path::new("/m/The.Long_Road.2019.mkv")), "The Long Road 2019");
+    assert_eq!(display_title(Path::new("/m/Vol. 2 - Intro.mp3")), "Vol. 2 - Intro");
+    assert_eq!(display_title(Path::new("https://example.com/live/my_show.m3u8?token=1")), "my show");
+    assert_eq!(display_title(Path::new("https://example.com/")), "https://example.com/");
+}
+
+#[test]
+fn media_kind_follows_extension_and_url() {
+    use airmedia::library::MediaKind;
+    assert_eq!(MediaKind::of(Path::new("a.FLAC")), MediaKind::Audio);
+    assert_eq!(MediaKind::of(Path::new("a.mkv")), MediaKind::Video);
+    assert_eq!(MediaKind::of(Path::new("https://x.test/a.mp3")), MediaKind::Stream);
+}
+
+#[test]
+fn library_merges_sources_without_duplicates() {
+    use airmedia::library::Library;
+    let playlist = lib_paths(&["/m/a.mkv", "/m/b.mp3"]);
+    let recent = lib_paths(&["/m/b.mp3", "/m/c.mp4"]);
+    let resume = lib_paths(&["/m/c.mp4"]);
+    let lib = Library::build(&playlist, &recent, &resume, &mut |_| true);
+
+    assert_eq!(lib.entries.len(), 3);
+    assert_eq!(lib.videos.len(), 2);
+    assert_eq!(lib.music.len(), 1);
+    let titles: Vec<&str> = lib.rows.iter().map(|r| r.title.as_str()).collect();
+    assert_eq!(titles, ["Pick Up Where You Left Off", "Your Playlist", "Recently Played", "Videos", "Music"]);
+    // c.mp4 is in the resume row, so "Recently Played" doesn't repeat it.
+    let recent_row = &lib.rows[2];
+    assert_eq!(recent_row.items.len(), 1);
+    assert_eq!(lib.entries[recent_row.items[0]].path, PathBuf::from("/m/b.mp3"));
+}
+
+#[test]
+fn library_hides_missing_history_but_keeps_streams() {
+    use airmedia::library::Library;
+    let recent = lib_paths(&["/gone/a.mkv", "https://x.test/live"]);
+    let lib = Library::build(&[], &recent, &[], &mut |_| false);
+    assert_eq!(lib.entries.len(), 1);
+    assert_eq!(lib.entries[0].path, PathBuf::from("https://x.test/live"));
+}
+
+#[test]
+fn library_folder_rows_need_two_folders_and_enough_items() {
+    use airmedia::library::Library;
+    let one_folder = lib_paths(&["/a/1.mp4", "/a/2.mp4", "/a/3.mp4"]);
+    let lib = Library::build(&one_folder, &[], &[], &mut |_| true);
+    assert!(lib.rows.iter().all(|r| !r.title.starts_with("From ")));
+
+    let two_folders = lib_paths(&["/a/10.mp4", "/a/2.mp4", "/a/3.mp4", "/b/1.mp4"]);
+    let lib = Library::build(&two_folders, &[], &[], &mut |_| true);
+    let row = lib.rows.iter().find(|r| r.title == "From a").expect("row for folder a");
+    let order: Vec<&str> = row.items.iter().map(|i| lib.entries[*i].title.as_str()).collect();
+    assert_eq!(order, ["2", "3", "10"], "natural order");
+    assert!(lib.rows.iter().all(|r| r.title != "From b"), "too small for a row");
+}
+
+#[test]
+fn library_featured_prefers_playing_then_resume_then_next() {
+    use airmedia::library::{FeaturedReason, Library};
+    let playlist = lib_paths(&["/m/a.mkv", "/m/b.mkv"]);
+    let resume = lib_paths(&["/m/c.mkv"]);
+    let lib = Library::build(&playlist, &[], &resume, &mut |_| true);
+
+    let a = Path::new("/m/a.mkv");
+    let (idx, why) = lib.featured(Some(a), None).unwrap();
+    assert_eq!((lib.entries[idx].path.as_path(), why), (a, FeaturedReason::NowPlaying));
+    let (idx, why) = lib.featured(None, Some(Path::new("/m/b.mkv"))).unwrap();
+    assert_eq!((lib.entries[idx].path.as_path(), why), (Path::new("/m/c.mkv"), FeaturedReason::Continue));
+
+    let no_resume = Library::build(&playlist, &[], &[], &mut |_| true);
+    let (idx, why) = no_resume.featured(None, Some(Path::new("/m/b.mkv"))).unwrap();
+    assert_eq!((no_resume.entries[idx].path.as_path(), why), (Path::new("/m/b.mkv"), FeaturedReason::UpNext));
+    assert!(Library::default().featured(None, None).is_none());
+}
+
+#[test]
+fn library_search_matches_all_terms_in_title_and_folder() {
+    use airmedia::library::Library;
+    let playlist = lib_paths(&["/Holiday/beach_day.mp4", "/Work/beach-report.pdf.mp4", "/Holiday/city.mp4"]);
+    let lib = Library::build(&playlist, &[], &[], &mut |_| true);
+    assert_eq!(lib.search("BEACH").len(), 2);
+    assert_eq!(lib.search("holiday beach").len(), 1);
+    assert!(lib.search("   ").is_empty());
+    assert!(lib.search("nothing").is_empty());
+}
+
+#[test]
+fn format_duration_short_picks_a_compact_form() {
+    use airmedia::library::format_duration_short;
+    assert_eq!(format_duration_short(187.0), "3:07");
+    assert_eq!(format_duration_short(42.0 * 60.0), "42m");
+    assert_eq!(format_duration_short(3600.0), "1h");
+    assert_eq!(format_duration_short(3600.0 + 42.0 * 60.0), "1h 42m");
+}
+
+#[test]
+fn peek_next_matches_what_auto_advance_does() {
+    use airmedia::playlist::{Playlist, RepeatMode};
+    let mut pl = Playlist::new();
+    pl.add("/m/a.mkv");
+    pl.add("/m/b.mkv");
+    assert!(pl.peek_next().is_none(), "nothing playing yet");
+
+    pl.current_index = Some(0);
+    assert_eq!(pl.peek_next().unwrap().title, "b.mkv");
+    pl.current_index = Some(1);
+    assert!(pl.peek_next().is_none(), "end of list");
+    pl.repeat_mode = RepeatMode::All;
+    assert_eq!(pl.peek_next().unwrap().title, "a.mkv");
+    pl.repeat_mode = RepeatMode::One;
+    assert!(pl.peek_next().is_none());
+    pl.repeat_mode = RepeatMode::Off;
+    pl.is_shuffle = true;
+    assert!(pl.peek_next().is_none(), "shuffle order isn't known ahead of time");
+}
+
+#[test]
+fn stopped_position_survives_and_old_session_entries_still_load() {
+    use airmedia::persistence::SessionState;
+    let movie = Path::new("/m/movie.mkv");
+    let mut s = SessionState::default();
+    s.record_position(movie, 120.0, 600.0);
+    assert_eq!(s.resume_progress(movie), Some((120.0, 600.0)));
+    assert_eq!(s.resume_paths(), vec![movie.to_path_buf()]);
+    s.forget_position(movie);
+    assert_eq!(s.resume_progress(movie), None);
+
+    // Sessions written before durations were stored.
+    let old = r#"{"resume":[{"path":"/m/movie.mkv","position_secs":90.0}]}"#;
+    let loaded: SessionState = serde_json::from_str(old).unwrap();
+    assert_eq!(loaded.resume_progress(movie), Some((90.0, 0.0)));
+}

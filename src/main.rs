@@ -33,8 +33,8 @@ fn main() -> eframe::Result<()> {
         .collect();
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([420.0, 720.0])
-        .with_min_inner_size([360.0, 560.0])
+        .with_inner_size([1280.0, 780.0])
+        .with_min_inner_size([480.0, 400.0])
         .with_title(APP_NAME)
         .with_active(true)
         .with_drag_and_drop(true);

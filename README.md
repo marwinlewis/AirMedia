@@ -36,27 +36,33 @@ AirMedia supports seamless on-the-fly hardware decoding through:
 
 ## 🖥️ Interface
 
-AirMedia uses a minimal, immersive interface: the video fills the window and all chrome fades away while you watch.
+AirMedia is built around two screens: a library to browse and a player that gets out of the way.
 
-1. **Empty state**: a clean start screen with *Open file* / *Open stream* actions and drag-and-drop anywhere.
-2. **Top overlay**: app menu button, current title, and quiet technical details (resolution, frame rate, decoder).
-   The app menu holds everything from the classic menu bar (Open, Recent, Playback, Audio, Video, Subtitles,
-   Playlist, Media information, Codec Setup, Preferences, About, Quit) with shortcuts shown inline.
-3. **Bottom overlay**:
-   - Thin seek bar that grows on hover, with a floating timestamp preview; seeks on release.
-   - Play/Pause, Previous, Next, volume (0–150%, with a 100% marker) and elapsed / total (or remaining) time.
-   - **Subtitles** popup: track selection, load external file, delay adjustment.
-   - **Settings** popup: playback speed, aspect ratio, audio track, audio delay, hardware decoder, media information.
-   - Playlist and fullscreen toggles.
-4. **Playlist drawer**: slides in from the right with search, shuffle, repeat (all / one), clear, and a now-playing indicator.
-   Playlists (`.m3u`, `.m3u8`, `.pls`) can be imported and saved from the app menu; folders are added in natural filename order.
-5. **Session memory**: the playlist, recent files, equalizer settings and the playback position of each file are restored on
-   the next launch (files resume where you stopped if you were more than 30 s in and not near the end).
-6. **Subtitles**: sidecar files (`movie.srt`, `movie.en.srt`, `.vtt`, `.ass`) load automatically; embedded text tracks are
-   extracted in the background. UTF-8, UTF-16 and legacy Windows-1252 files are supported.
-7. **Dialogs**: Effects (10-band equalizer with presets and preamp, video color adjustments), Media information,
-   Codec Engine Setup, Preferences, Open network stream, and About — all sharing one consistent dark style.
-8. **Auto-hide**: controls and the cursor hide after a configurable idle time while playing.
+1. **Home**: a transparent navigation bar over a full-bleed banner featuring what is playing, what you can resume or what is
+   next, followed by horizontally scrolling rows: *Pick Up Where You Left Off*, *Your Playlist*, *Recently Played*, *Videos*,
+   *Music* and one row per folder. On first run it shows the ways to get media in, and nothing fake.
+2. **Cards**: 16:9 thumbnails generated in the background with ffmpeg and cached on disk (`<config>/thumbnails`), with a
+   picture next to the file (`movie.jpg`, or `cover.jpg` / `folder.jpg` for music) taking priority. Hover for play and info;
+   right-click to add to or remove from the playlist or history. Progress bars show how far you got.
+3. **Videos / Music / Search**: responsive grids that stay smooth with thousands of items. `Ctrl + F` searches titles and folders.
+4. **Details**: *More Info* opens an overlay with artwork, metadata, *Resume* / *Start Over* and playlist actions.
+5. **Player**: edge-to-edge video with a back button and title on top, and the seek bar (floating timestamp, A-B markers) and
+   transport at the bottom: play/pause, ±10 s, volume (0–150%, with a 100% mark), elapsed / total or remaining time, previous /
+   next, shuffle, repeat, playlist, speed, **audio & subtitles** (tracks, delay, load a file), **settings** (speed, aspect ratio,
+   hardware decoder, equalizer, screenshot, jump to time, A-B loop, media information, preferences) and fullscreen.
+   Near the end of an item, a button jumps straight to the next one.
+6. **Music**: dimmed artwork fills the window behind the cover, title and a live spectrum visualizer.
+7. **Mini player**: press back while something plays and it keeps going in a bar under the library, with seeking, transport and
+   volume; click it to return.
+8. **Playlist drawer**: slides in from the right on either screen with search, multi-select, drag-to-reorder, shuffle, repeat and
+   a now-playing indicator. Playlists (`.m3u`, `.m3u8`, `.pls`) can be imported and saved from the app menu.
+9. **App menu**: the menu button holds everything else (Recent, Playback, Audio, Video, Subtitles, Codec Setup, Preferences,
+   About, Quit) with shortcuts shown inline.
+10. **Session memory**: the playlist, recent files, equalizer settings and the playback position of each file are restored on
+    the next launch (files resume where you stopped if you were more than 30 s in and not near the end).
+11. **Subtitles**: sidecar files (`movie.srt`, `movie.en.srt`, `.vtt`, `.ass`) load automatically; embedded text tracks are
+    extracted in the background. UTF-8, UTF-16 and legacy Windows-1252 files are supported.
+12. **Auto-hide**: controls and the cursor hide after a configurable idle time while a video plays.
 
 ---
 
@@ -65,7 +71,7 @@ AirMedia uses a minimal, immersive interface: the video fills the window and all
 | Shortcut | Action |
 |---|---|
 | `Space` | Play / Pause |
-| `S` | Stop playback |
+| `S` | Stop and return to the library |
 | `N / P` | Next / Previous track in playlist |
 | `Media keys` | Play/Pause, Stop, Next and Previous track |
 | `.` | Step 1 frame forward |
@@ -90,9 +96,10 @@ AirMedia uses a minimal, immersive interface: the video fills the window and all
 | `Drag` | Reorder playlist items |
 | `O` | Open media file |
 | `Ctrl + N` | Open network stream |
+| `Ctrl + F` | Search the library |
 | `F` or `F11` | Toggle fullscreen |
 | `Double click` | Toggle fullscreen |
-| `Esc` | Exit fullscreen / close dialog |
+| `Esc` | Close dialog / exit fullscreen / back to the library |
 | `Ctrl + T` | Toggle always on top |
 | `I` | Media information |
 | `Ctrl + P` | Preferences |

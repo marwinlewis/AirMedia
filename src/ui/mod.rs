@@ -1,4 +1,6 @@
 pub mod about_dialog;
+pub mod artwork;
+pub mod browse;
 pub mod canvas;
 pub mod codec_dialog;
 pub mod controls;
@@ -9,11 +11,11 @@ pub mod icons;
 pub mod info_dialog;
 pub mod jump_dialog;
 pub mod menu_bar;
+pub mod mini_player;
 pub mod playlist_view;
 pub mod preferences_dialog;
 pub mod shortcuts_dialog;
 pub mod stream_dialog;
 pub mod theme;
-pub mod top_bar;
 
 pub use file_dialog::NativeFileDialog as FileDialog;

@@ -71,8 +71,8 @@ pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
 }
 
 pub fn primary_button(text: &str) -> egui::Button<'static> {
-    egui::Button::new(RichText::new(text.to_owned()).font(Theme::font_semibold(13.5)).color(Theme::TEXT))
-        .fill(Theme::ACCENT)
+    egui::Button::new(RichText::new(text.to_owned()).font(Theme::font_semibold(13.5)).color(Theme::BG))
+        .fill(Theme::TEXT)
         .corner_radius(Theme::radius_sm())
         .min_size(Vec2::new(96.0, 32.0))
 }

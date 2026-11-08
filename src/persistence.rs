@@ -50,6 +50,9 @@ pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 pub struct ResumeEntry {
     pub path: PathBuf,
     pub position_secs: f64,
+    /// Total length when the position was saved (0 in sessions from older versions).
+    #[serde(default)]
+    pub duration_secs: f64,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -109,6 +112,7 @@ impl SessionState {
             self.resume.push(ResumeEntry {
                 path: path.to_path_buf(),
                 position_secs,
+                duration_secs,
             });
             if self.resume.len() > MAX_RESUME_ENTRIES {
                 let excess = self.resume.len() - MAX_RESUME_ENTRIES;
@@ -119,5 +123,29 @@ impl SessionState {
 
     pub fn resume_position(&self, path: &Path) -> Option<f64> {
         self.resume.iter().find(|e| e.path == path).map(|e| e.position_secs)
+    }
+
+    /// Saved `(position, duration)` of `path`, for progress bars.
+    pub fn resume_progress(&self, path: &Path) -> Option<(f64, f64)> {
+        self.resume
+            .iter()
+            .find(|e| e.path == path)
+            .map(|e| (e.position_secs, e.duration_secs))
+    }
+
+    /// Paths with a saved position, most recently watched first.
+    pub fn resume_paths(&self) -> Vec<PathBuf> {
+        self.resume.iter().rev().map(|e| e.path.clone()).collect()
+    }
+
+    /// Drops `path` from the recent list and its saved position.
+    pub fn forget(&mut self, path: &Path) {
+        self.recent_files.retain(|p| p != path);
+        self.resume.retain(|e| e.path != path);
+    }
+
+    /// Drops only the saved position, so `path` plays from the beginning next time.
+    pub fn forget_position(&mut self, path: &Path) {
+        self.resume.retain(|e| e.path != path);
     }
 }

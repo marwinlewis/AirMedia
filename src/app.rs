@@ -1,26 +1,30 @@
 use crate::ab_loop::AbLoop;
+use crate::library::{display_title, library_signature, Library};
 use crate::media::decoder::HwAccelMode;
 use crate::media::{is_url, MediaPlayer};
 use crate::persistence::SessionState;
 use crate::playlist::{Playlist, RepeatMode};
 use crate::ui::about_dialog::AboutDialog;
+use crate::ui::artwork::ArtworkCache;
+use crate::ui::browse::{self, BrowseAction, BrowseCx, BrowseState};
 use crate::ui::codec_dialog::{CodecDialog, CodecDialogState};
-use crate::ui::canvas::{AspectRatioMode, VideoCanvas};
-use crate::ui::controls::{ControlsCtx, ControlsView};
+use crate::ui::canvas::{AspectRatioMode, AudioStage, VideoCanvas};
+use crate::ui::controls::{ControlsCtx, ControlsView, BOTTOM_CONTROLS_H};
 use crate::ui::equalizer_dialog::EqualizerDialog;
 use crate::ui::info_dialog::InfoDialog;
 use crate::ui::jump_dialog::JumpDialog;
 
 use crate::ui::menu_bar::{media_dialog, MenuBarView, MenuCtx, OpenRequest};
+use crate::ui::mini_player::{self, MiniPlayerCx, MINI_PLAYER_HEIGHT};
 use crate::ui::playlist_view::PlaylistView;
 use crate::ui::preferences_dialog::{PreferencesDialog, PreferencesState};
 use crate::ui::shortcuts_dialog::ShortcutsDialog;
 use crate::ui::stream_dialog::StreamDialog;
 use crate::ui::theme::Theme;
-use crate::ui::top_bar::TopBarView;
 
-use eframe::egui::{self, Align2, Key, Popup, PopupCloseBehavior, Pos2, Rect, RichText, Stroke, Ui, Vec2};
-use std::path::PathBuf;
+use eframe::egui::{self, Align2, Key, Popup, PopupCloseBehavior, Pos2, Rect, Response, Sense, Stroke, Ui, UiBuilder, Vec2};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// How often session state (playlist, resume positions, ...) is flushed to disk.
@@ -28,7 +32,18 @@ const SESSION_SAVE_INTERVAL: Duration = Duration::from_secs(10);
 /// A pipeline that "finishes" this quickly after starting failed to play rather than ended.
 const MIN_PLAYBACK_BEFORE_ADVANCE: Duration = Duration::from_millis(500);
 
+/// The two top-level screens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum View {
+    /// The library: home page, grids and search.
+    #[default]
+    Browse,
+    /// Fullscreen-style playback.
+    Player,
+}
+
 pub struct AirMediaApp {
+    pub view: View,
     pub player: MediaPlayer,
     pub playlist: Playlist,
     pub canvas: VideoCanvas,
@@ -62,8 +77,19 @@ pub struct AirMediaApp {
     /// Window level last sent to the OS, so the command is only sent on change.
     applied_always_on_top: Option<bool>,
     logo_texture: Option<egui::TextureHandle>,
-    cover_texture: Option<egui::TextureHandle>,
-    local_cover_texture: Option<(PathBuf, egui::TextureHandle)>,
+    artwork: ArtworkCache,
+    library: Library,
+    library_signature: Option<u64>,
+    /// Per-run memo of file existence: a dead network drive must not stall every rebuild.
+    known_paths: HashMap<PathBuf, bool>,
+    browse: BrowseState,
+    /// Work requested by the UI, run at the end of the frame.
+    actions: Vec<BrowseAction>,
+    /// Library item whose details overlay is open.
+    details: Option<PathBuf>,
+    controls_hovered: bool,
+    /// Whether the controls were showing when the current press began (touch toggling).
+    controls_up_at_press: bool,
 }
 
 impl AirMediaApp {
@@ -90,6 +116,7 @@ impl AirMediaApp {
 
         let last_session_json = session.to_json();
         Self {
+            view: View::Browse,
             player,
             playlist,
             canvas: VideoCanvas::new(),
@@ -119,43 +146,19 @@ impl AirMediaApp {
             last_session_json,
             applied_always_on_top: None,
             logo_texture: None,
-            cover_texture: None,
-            local_cover_texture: None,
+            artwork: ArtworkCache::default(),
+            library: Library::default(),
+            library_signature: None,
+            known_paths: HashMap::new(),
+            browse: BrowseState::default(),
+            actions: Vec::new(),
+            details: None,
+            controls_hovered: false,
+            controls_up_at_press: false,
         }
     }
 
-        fn get_active_cover(&mut self, ctx: &egui::Context, default_cover: &egui::TextureHandle) -> egui::TextureHandle {
-        if let Some(media_path) = &self.player.current_file {
-            if let Some(parent) = media_path.parent() {
-                if let Some((cached_path, tex)) = &self.local_cover_texture {
-                    if cached_path == media_path {
-                        return tex.clone();
-                    }
-                }
-                for name in &["cover.png", "cover.jpg", "folder.jpg", "album.jpg", "front.jpg"] {
-                    let p = parent.join(name);
-                    if p.exists() {
-                        if let Ok(bytes) = std::fs::read(&p) {
-                            if let Ok(img) = image::load_from_memory(&bytes) {
-                                let rgba = img.to_rgba8();
-                                let (w, h) = rgba.dimensions();
-                                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                                    [w as usize, h as usize],
-                                    &rgba.into_raw(),
-                                );
-                                let tex = ctx.load_texture("local_cover", color_image, egui::TextureOptions::LINEAR);
-                                self.local_cover_texture = Some((media_path.clone(), tex.clone()));
-                                return tex;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        default_cover.clone()
-    }
-
-pub fn set_toast(&mut self, msg: impl Into<String>) {
+    pub fn set_toast(&mut self, msg: impl Into<String>) {
         self.toast = Some((msg.into(), Instant::now(), 1.4));
     }
 
@@ -186,7 +189,7 @@ pub fn set_toast(&mut self, msg: impl Into<String>) {
         }
         let added = collected.media.len();
 
-        if let Some(first) = first_target.filter(|_| play || self.player.current_file.is_none()) {
+        if let Some(first) = first_target.filter(|_| play) {
             self.play_index(first);
             if added > 1 && self.player.current_file.is_some() {
                 self.set_toast(format!("Added {added} items to the playlist"));
@@ -225,6 +228,10 @@ pub fn set_toast(&mut self, msg: impl Into<String>) {
 
         if changed {
             self.ab_loop.clear();
+            self.canvas.clear();
+            if current.is_some() {
+                self.view = View::Player;
+            }
             if let Some((old, pos, dur)) = self.tracked.take() {
                 if !is_url(&old) {
                     self.session.record_position(&old, pos, dur);
@@ -281,7 +288,7 @@ pub fn set_toast(&mut self, msg: impl Into<String>) {
         }
         if self.player.playback_started_at.elapsed() < MIN_PLAYBACK_BEFORE_ADVANCE {
             // Ended immediately: the media can't be decoded. Don't spin through retries.
-            self.player.stop();
+            self.close_media();
             self.set_error_toast("Playback failed: the media could not be decoded");
             return;
         }
@@ -309,7 +316,117 @@ pub fn set_toast(&mut self, msg: impl Into<String>) {
                 self.set_toast(format!("Playing: {title}"));
             }
         } else {
-            self.player.stop();
+            self.close_media();
+        }
+    }
+
+    /// Stops playback and returns to the library. The position is saved by the next
+    /// `track_current_file`, so a stopped item can be resumed from its card.
+    fn close_media(&mut self) {
+        self.player.unload();
+        self.view = View::Browse;
+    }
+
+    /// A card or the banner asked to play `path`.
+    fn play_from_library(&mut self, path: PathBuf) {
+        if self.player.current_file.as_deref() == Some(path.as_path()) {
+            self.view = View::Player;
+            if !self.player.is_playing {
+                self.player.resume();
+            }
+        } else {
+            self.open_paths(vec![path], true);
+        }
+    }
+
+    /// Rebuilds the library if the playlist or history changed.
+    fn refresh_library(&mut self) {
+        let resume = self.session.resume_paths();
+        let signature = library_signature(&self.playlist, &self.session.recent_files, &resume);
+        if self.library_signature == Some(signature) {
+            return;
+        }
+        self.library_signature = Some(signature);
+        let playlist: Vec<PathBuf> = self.playlist.items.iter().map(|i| i.path.clone()).collect();
+        let known = &mut self.known_paths;
+        let mut exists = |p: &Path| *known.entry(p.to_path_buf()).or_insert_with(|| p.exists());
+        self.library = Library::build(&playlist, &self.session.recent_files, &resume, &mut exists);
+    }
+
+    fn run_actions(&mut self, ctx: &egui::Context) {
+        for action in std::mem::take(&mut self.actions) {
+            match action {
+                BrowseAction::Play(path) => self.play_from_library(path),
+                BrowseAction::PlayFromStart(path) => {
+                    self.session.forget_position(&path);
+                    if self.player.current_file.as_deref() == Some(path.as_path()) {
+                        self.player.seek(0.0);
+                        self.view = View::Player;
+                    } else {
+                        self.open_paths(vec![path], true);
+                    }
+                }
+                BrowseAction::ShowDetails(path) => self.details = Some(path),
+                BrowseAction::AddToPlaylist(path) => {
+                    if !self.playlist.items.iter().any(|i| i.path == path) {
+                        self.playlist.add(&path);
+                        self.set_toast("Added to playlist");
+                    }
+                }
+                BrowseAction::RemoveFromPlaylist(path) => {
+                    if let Some(idx) = self.playlist.items.iter().position(|i| i.path == path) {
+                        self.playlist.remove(idx);
+                        self.set_toast("Removed from playlist");
+                    }
+                }
+                BrowseAction::ForgetHistory(path) => {
+                    self.session.forget(&path);
+                    self.set_toast("Removed from history");
+                }
+                BrowseAction::OpenFile => self.open_file_dialog(),
+                BrowseAction::OpenFiles => {
+                    if let Some(files) = media_dialog().pick_files() {
+                        self.open_paths(files, false);
+                    }
+                }
+                BrowseAction::OpenFolder => {
+                    if let Some(folder) = crate::ui::FileDialog::new().pick_folder() {
+                        self.open_paths(vec![folder], false);
+                    }
+                }
+                BrowseAction::OpenStream => self.show_stream = true,
+                BrowseAction::TogglePlaylist => self.show_playlist = !self.show_playlist,
+            }
+        }
+        // A file dialog may have blocked for a while; don't count that as idle time.
+        self.last_mouse_activity = Instant::now();
+        ctx.request_repaint();
+    }
+
+    /// Current media's `(title, subtitle)`, or `None` when nothing is loaded.
+    fn now_labels(&self) -> Option<(String, String)> {
+        let path = self.player.current_file.as_deref()?;
+        let info = self.player.media_info.as_ref();
+        let video = info.and_then(|m| m.video_dimensions());
+        let audio_only = info.is_some_and(|m| m.primary_video_stream().is_none());
+        if audio_only {
+            let title = info.and_then(|m| m.title()).filter(|t| !t.trim().is_empty()).unwrap_or_else(|| display_title(path));
+            let credit: Vec<String> = [info.and_then(|m| m.artist()), info.and_then(|m| m.album())]
+                .into_iter()
+                .flatten()
+                .filter(|s| !s.trim().is_empty())
+                .collect();
+            Some((title, credit.join(" \u{00b7} ")))
+        } else {
+            let codec = info.and_then(|m| m.primary_video_stream()).and_then(|v| v.codec_name.as_deref());
+            let mut tech = Vec::new();
+            if let Some((_, h)) = video {
+                tech.push(if h >= 2000 { "4K".to_string() } else { format!("{h}p") });
+            }
+            if let Some(c) = codec {
+                tech.push(c.to_uppercase());
+            }
+            Some((display_title(path), tech.join(" \u{00b7} ")))
         }
     }
 
@@ -329,11 +446,6 @@ pub fn set_toast(&mut self, msg: impl Into<String>) {
                 self.set_toast(format!("Prev: {title}"));
             }
         }
-    }
-
-    fn toggle_play_with_toast(&mut self) {
-        self.player.toggle_play();
-        self.set_toast(if self.player.is_playing { "Playing" } else { "Paused" });
     }
 
     /// B: set A, then B, then clear.
@@ -371,14 +483,13 @@ pub fn set_toast(&mut self, msg: impl Into<String>) {
         let has_media = self.player.current_file.is_some();
         if play_pause {
             if has_media {
-                self.toggle_play_with_toast();
+                self.player.toggle_play();
             } else if let Some(idx) = self.playlist.current_index.or((!self.playlist.items.is_empty()).then_some(0)) {
                 self.play_index(idx);
             }
         }
         if stop && has_media {
-            self.player.stop();
-            self.set_toast("Stopped");
+            self.close_media();
         }
         if next {
             self.play_next();
@@ -402,25 +513,45 @@ pub fn set_toast(&mut self, msg: impl Into<String>) {
         let has_media = self.player.current_file.is_some();
 
         // Fullscreen toggle: F or F11
-        if input.key_pressed(Key::F) || input.key_pressed(Key::F11) {
+        if (input.key_pressed(Key::F) && !input.modifiers.ctrl) || input.key_pressed(Key::F11) {
             self.toggle_fullscreen(ctx);
         }
 
-        // Exit fullscreen on Esc
-        if input.key_pressed(Key::Escape) && self.is_fullscreen {
-            self.is_fullscreen = false;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        // Ctrl+F: Search the library
+        if input.modifiers.ctrl && input.key_pressed(Key::F) {
+            self.view = View::Browse;
+            self.browse.open_search();
         }
 
-        // Space: Play / Pause
-        if has_media && input.key_pressed(Key::Space) {
-            self.toggle_play_with_toast();
+        // Esc steps back one level at a time. Open dialogs handle it themselves.
+        if input.key_pressed(Key::Escape) && !self.any_dialog_open() && !Popup::is_any_open(ctx) {
+            if self.is_fullscreen {
+                self.is_fullscreen = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            } else if self.show_playlist {
+                self.show_playlist = false;
+            } else if self.view == View::Player {
+                self.view = View::Browse;
+            } else if self.browse.search_open {
+                self.browse.close_search();
+            }
+        }
+
+        // Space: Play / Pause (or start the featured item from the library)
+        if input.key_pressed(Key::Space) {
+            if has_media {
+                self.player.toggle_play();
+            } else {
+                let up_next = self.playlist.current_item().map(|i| i.path.clone());
+                if let Some((idx, _)) = self.library.featured(None, up_next.as_deref()) {
+                    self.actions.push(BrowseAction::Play(self.library.entries[idx].path.clone()));
+                }
+            }
         }
 
         // S: Stop
         if has_media && input.key_pressed(Key::S) && !input.modifiers.ctrl && !input.modifiers.shift {
-            self.player.stop();
-            self.set_toast("Stopped");
+            self.close_media();
         }
 
         // Shift+S: Take Screenshot
@@ -620,6 +751,296 @@ pub fn set_toast(&mut self, msg: impl Into<String>) {
         }
     }
 
+    fn any_dialog_open(&self) -> bool {
+        self.show_info
+            || self.show_equalizer
+            || self.show_stream
+            || self.show_preferences
+            || self.show_about
+            || self.show_codecs
+            || self.show_shortcuts
+            || self.show_jump
+            || self.details.is_some()
+    }
+
+    fn adjust_volume_by_wheel(&mut self, ctx: &egui::Context) {
+        if Popup::is_any_open(ctx) {
+            return;
+        }
+        let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
+        if scroll.abs() > 2.0 {
+            let delta = if scroll > 0.0 { 0.05 } else { -0.05 };
+            let new_vol = (self.player.get_volume() + delta).clamp(0.0, 1.5);
+            self.player.set_volume(new_vol);
+            self.set_toast(format!("Volume {}%", (new_vol * 100.0).round() as u32));
+        }
+    }
+
+    /// Opens the app menu under `button` and applies whatever was chosen in it.
+    fn app_menu(&mut self, ctx: &egui::Context, button: &Response) {
+        let mut toast = None;
+        let mut toggle_fs = false;
+        let mut open_request: Option<OpenRequest> = None;
+        let mut open_jump = false;
+        let mut stop_request = false;
+        let mut always_on_top = self.preferences_state.always_on_top;
+        Popup::menu(button)
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .gap(6.0)
+            .show(|ui| {
+                MenuBarView::show(
+                    ui,
+                    &mut self.player,
+                    &mut self.playlist,
+                    MenuCtx {
+                        recent_files: &mut self.session.recent_files,
+                        open_request: &mut open_request,
+                        aspect_mode: &mut self.canvas.aspect_mode,
+                        show_playlist: &mut self.show_playlist,
+                        show_info: &mut self.show_info,
+                        show_equalizer: &mut self.show_equalizer,
+                        show_stream: &mut self.show_stream,
+                        show_preferences: &mut self.show_preferences,
+                        show_about: &mut self.show_about,
+                        show_codecs: &mut self.show_codecs,
+                        show_shortcuts: &mut self.show_shortcuts,
+                        open_jump: &mut open_jump,
+                        stop_request: &mut stop_request,
+                        ab_loop: &mut self.ab_loop,
+                        always_on_top: &mut always_on_top,
+                        toggle_fullscreen: &mut toggle_fs,
+                        toast_msg: &mut toast,
+                        prefs: &self.preferences_state,
+                    },
+                );
+            });
+        self.preferences_state.always_on_top = always_on_top;
+        if let Some(t) = toast {
+            self.set_toast(t);
+        }
+        if let Some(req) = open_request {
+            self.open_paths(req.paths, req.play);
+        }
+        if toggle_fs {
+            self.toggle_fullscreen(ctx);
+        }
+        if open_jump {
+            self.open_jump_dialog();
+        }
+        if stop_request {
+            self.close_media();
+        }
+    }
+
+    /// The library, with the now-playing bar docked under it when something is loaded.
+    fn browse_screen(&mut self, ui: &mut Ui, ctx: &egui::Context, rect: Rect, logo: &egui::TextureHandle, levels: [f32; 16]) {
+        self.refresh_library();
+
+        let labels = self.now_labels();
+        let (page_rect, bar_rect) = if labels.is_some() {
+            let split = rect.max.y - MINI_PLAYER_HEIGHT;
+            (
+                Rect::from_min_max(rect.min, Pos2::new(rect.max.x, split)),
+                Some(Rect::from_min_max(Pos2::new(rect.min.x, split), rect.max)),
+            )
+        } else {
+            (rect, None)
+        };
+
+        let current = self.player.current_file.clone();
+        let up_next = self.playlist.current_item().map(|i| i.path.clone());
+        let is_video = self.player.media_info.as_ref().is_some_and(|m| m.primary_video_stream().is_some());
+        let mut cx = BrowseCx {
+            library: &self.library,
+            art: &mut self.artwork,
+            session: &self.session,
+            now_playing: current.as_deref(),
+            is_playing: self.player.is_playing,
+            up_next: up_next.as_deref(),
+            playlist_len: self.playlist.items.len(),
+            playlist_open: self.show_playlist,
+            live_frame: self.canvas.texture.as_ref().filter(|_| is_video),
+            logo,
+            levels,
+            actions: &mut self.actions,
+        };
+        let menu = browse::show(ui, page_rect, &mut self.browse, &mut cx);
+
+        // Details overlay, shown above everything on this screen.
+        let mut details_closed = false;
+        if let Some(path) = &self.details {
+            match self.library.position(path) {
+                Some(idx) => details_closed = browse::details_modal(ctx, &self.library.entries[idx], &mut cx),
+                None => details_closed = true,
+            }
+        }
+        if details_closed {
+            self.details = None;
+        }
+
+        if let (Some(bar), Some(path), Some((title, subtitle))) = (bar_rect, current.as_deref(), &labels) {
+            let out = mini_player::show(
+                ui,
+                bar,
+                &mut self.player,
+                MiniPlayerCx {
+                    path,
+                    title,
+                    subtitle,
+                    live_frame: self.canvas.texture.as_ref().filter(|_| is_video),
+                    art: &mut self.artwork,
+                },
+            );
+            if out.expand {
+                self.view = View::Player;
+            }
+            if out.stop {
+                self.close_media();
+            }
+            if out.next {
+                self.play_next();
+            }
+            if out.prev {
+                self.play_prev();
+            }
+        }
+
+        self.app_menu(ctx, &menu);
+    }
+
+    /// Edge-to-edge playback with controls that fade away.
+    fn player_screen(&mut self, ui: &mut Ui, ctx: &egui::Context, rect: Rect, subtitle: Option<&str>, levels: [f32; 16]) {
+        let Some((title, sub_label)) = self.now_labels() else {
+            self.view = View::Browse;
+            return;
+        };
+        let audio_only = self.player.media_info.as_ref().is_some_and(|m| m.primary_video_stream().is_none());
+
+        let idle = self.last_mouse_activity.elapsed().as_secs_f32() >= self.preferences_state.auto_hide_seconds;
+        let keep_up = !self.player.is_playing
+            || audio_only
+            || self.controls_hovered
+            || self.controls.is_seeking
+            || self.show_playlist
+            || self.any_dialog_open()
+            || Popup::is_any_open(ctx);
+        let controls_up = keep_up || !idle;
+        let opacity = ctx.animate_bool_with_time(egui::Id::unique("player_controls_fade"), controls_up, 0.22);
+        if ctx.input(|i| i.pointer.any_pressed()) {
+            self.controls_up_at_press = opacity > 0.5;
+        }
+
+        let canvas = if audio_only {
+            let path = self.player.current_file.clone().unwrap_or_default();
+            self.canvas.show_audio(
+                ui,
+                rect,
+                &mut self.artwork,
+                AudioStage {
+                    path: &path,
+                    title: &title,
+                    subtitle: &sub_label,
+                    levels: &levels,
+                    bottom_inset: BOTTOM_CONTROLS_H,
+                },
+            )
+        } else {
+            let lift = if controls_up { BOTTOM_CONTROLS_H + 12.0 } else { 0.0 };
+            self.canvas.show_video(ui, rect, subtitle, self.preferences_state.subtitle_size, lift)
+        };
+
+        let touch = ctx.input(|i| i.has_touch_screen());
+        if canvas.double_clicked() {
+            self.toggle_fullscreen(ctx);
+            if !touch {
+                // The first click of the pair toggled playback; put it back.
+                self.player.toggle_play();
+            }
+        } else if canvas.clicked() {
+            if touch {
+                // A tap shows or hides the controls; pausing is what the button is for.
+                if self.controls_up_at_press {
+                    self.last_mouse_activity = Instant::now() - Duration::from_secs(3600);
+                }
+            } else {
+                self.player.toggle_play();
+            }
+        }
+        if canvas.hovered() {
+            self.adjust_volume_by_wheel(ctx);
+            if opacity <= 0.0 {
+                ctx.set_cursor_icon(egui::CursorIcon::None);
+            }
+        }
+
+        self.controls.paint_flash(ui, rect, &self.player);
+
+        let up_next = self.playlist.peek_next().map(|i| display_title(&i.path));
+        let has_queue = self.playlist.items.len() > 1;
+        let mut toast = None;
+        let (mut toggle_fs, mut cycle_ab, mut open_jump, mut go_back, mut play_next, mut play_prev) =
+            (false, false, false, false, false, false);
+        let output = self.controls.show(
+            ui,
+            rect,
+            opacity,
+            &mut self.player,
+            ControlsCtx {
+                title: &title,
+                subtitle: &sub_label,
+                up_next: up_next.as_deref(),
+                aspect_mode: &mut self.canvas.aspect_mode,
+                show_playlist: &mut self.show_playlist,
+                show_info: &mut self.show_info,
+                show_preferences: &mut self.show_preferences,
+                show_equalizer: &mut self.show_equalizer,
+                is_fullscreen: self.is_fullscreen,
+                toggle_fullscreen: &mut toggle_fs,
+                toast_msg: &mut toast,
+                prefs: &mut self.preferences_state,
+                ab_loop: self.ab_loop,
+                cycle_ab_loop: &mut cycle_ab,
+                open_jump: &mut open_jump,
+                go_back: &mut go_back,
+                play_next: &mut play_next,
+                play_prev: &mut play_prev,
+                shuffle: &mut self.playlist.is_shuffle,
+                repeat: &mut self.playlist.repeat_mode,
+                has_queue,
+                audio_only,
+            },
+        );
+
+        self.controls_hovered = output.as_ref().is_some_and(|o| o.hovered);
+        if self.controls_hovered {
+            self.last_mouse_activity = Instant::now();
+        }
+        if let Some(t) = toast {
+            self.set_toast(t);
+        }
+        if toggle_fs {
+            self.toggle_fullscreen(ctx);
+        }
+        if cycle_ab {
+            self.cycle_ab_loop();
+        }
+        if open_jump {
+            self.open_jump_dialog();
+        }
+        if play_next {
+            self.play_next();
+        }
+        if play_prev {
+            self.play_prev();
+        }
+        if go_back {
+            self.view = View::Browse;
+        }
+        if let Some(out) = output {
+            self.app_menu(ctx, &out.menu);
+        }
+    }
+
     fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
         self.is_fullscreen = !self.is_fullscreen;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.is_fullscreen));
@@ -644,10 +1065,12 @@ impl eframe::App for AirMediaApp {
                     [w as usize, h as usize],
                     &img.into_raw(),
                 );
-                ctx.load_texture("app_logo", color_image, egui::TextureOptions::LINEAR)
+                let options = egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR };
+                ctx.load_texture("app_logo", color_image, options)
             })
             .clone();
 
+        self.artwork.begin_frame(&ctx);
         self.handle_shortcuts(&ctx);
         self.handle_drag_and_drop(&ctx);
         self.player.poll_background();
@@ -666,7 +1089,10 @@ impl eframe::App for AirMediaApp {
             ctx.request_repaint();
         }
 
-        let current_pointer = ctx.input(|i| i.pointer.hover_pos());
+        let (current_pointer, pressed) = ctx.input(|i| (i.pointer.hover_pos(), i.pointer.any_pressed()));
+        if pressed {
+            self.last_mouse_activity = Instant::now();
+        }
         if let Some(pos) = current_pointer {
             if let Some(last_pos) = self.last_pointer_pos {
                 if pos.distance(last_pos) > 2.0 {
@@ -677,13 +1103,6 @@ impl eframe::App for AirMediaApp {
             }
             self.last_pointer_pos = Some(pos);
         }
-
-        let is_audio_only = self
-            .player
-            .media_info
-            .as_ref()
-            .is_some_and(|m| m.primary_video_stream().is_none());
-        let has_media = self.player.current_file.is_some();
 
         let active_subtitle = self.player.get_active_subtitle_text();
         let visualizer_levels = self.player.get_visualizer();
@@ -706,253 +1125,28 @@ impl eframe::App for AirMediaApp {
             self.applied_always_on_top = Some(on_top);
         }
 
-        let (track_title, track_artist) = if let Some(item) = self.playlist.current_item() {
-            let t = self
-                .player
-                .media_info
-                .as_ref()
-                .and_then(|m| m.title())
-                .unwrap_or_else(|| item.title.clone());
-            let a = self
-                .player
-                .media_info
-                .as_ref()
-                .and_then(|m| m.artist())
-                .unwrap_or_else(|| "AirMedia".to_string());
-            (t, a)
-        } else {
-            ("Lif's Story".to_string(), "Nordafjoil".to_string())
+        let window_title = match self.now_labels() {
+            Some((title, _)) => format!("{title} \u{2014} AirMedia"),
+            None => "AirMedia".to_string(),
         };
-
-        if track_title != self.window_title {
-            let window_title = if self.playlist.current_item().is_none() {
-                "AirMedia".to_string()
-            } else {
-                format!("{track_title} — AirMedia")
-            };
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title));
-            self.window_title = track_title.clone();
+        if window_title != self.window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title.clone()));
+            self.window_title = window_title;
         }
-
-        let cover_tex = self
-            .cover_texture
-            .get_or_insert_with(|| {
-                let cover_bytes = include_bytes!("../assets/cover.png");
-                let img = image::load_from_memory(cover_bytes)
-                    .expect("Embedded cover.png must be valid")
-                    .to_rgba8();
-                let (w, h) = img.dimensions();
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                    [w as usize, h as usize],
-                    &img.into_raw(),
-                );
-                ctx.load_texture("default_cover", color_image, egui::TextureOptions::LINEAR)
-            })
-            .clone();
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Theme::BG))
             .show(ui, |ui| {
-                // Playlist drawer docks to the right; the card takes the rest.
+                // The playlist drawer docks to the right of either screen.
                 PlaylistView::show(ui, &mut self.playlist, &mut self.player, &mut self.show_playlist);
 
                 let full_rect = ui.available_rect_before_wrap();
-
-                // If in fullscreen and video is playing, fill screen with video
-                if self.is_fullscreen && !is_audio_only && self.canvas.texture.is_some() {
-                    let canvas_resp = self.canvas.show_in_rect(
-                        ui,
-                        full_rect,
-                        active_subtitle.as_deref(),
-                        self.preferences_state.subtitle_size,
-                        false,
-                        &visualizer_levels,
-                        None,
-                    );
-                    if canvas_resp.double_clicked() {
-                        self.toggle_fullscreen(&ctx);
-                    } else if canvas_resp.clicked() {
-                        self.player.toggle_play();
-                    }
-                    if canvas_resp.hovered() && !Popup::is_any_open(&ctx) {
-                        let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-                        if scroll.abs() > 2.0 {
-                            let delta = if scroll > 0.0 { 0.05 } else { -0.05 };
-                            let new_vol = (self.player.get_volume() + delta).clamp(0.0, 1.5);
-                            self.player.set_volume(new_vol);
-                            self.set_toast(format!("Volume {}%", (new_vol * 100.0).round() as u32));
-                        }
-                    }
-                } else {
-                    // Center the player card inside the window
-                    let max_card_w = 420.0;
-                    let card_w = full_rect.width().min(max_card_w);
-                    let card_x = full_rect.center().x - card_w / 2.0;
-                    let card_rect = Rect::from_min_size(
-                        Pos2::new(card_x, full_rect.min.y),
-                        Vec2::new(card_w, full_rect.height()),
-                    );
-
-                    // 1. Top Bar
-                    let top_resp = TopBarView::show(ui, card_rect, &self.player, &track_title);
-                    if top_resp.search_clicked {
-                        self.show_playlist = true;
-                    }
-
-                    let mut menu_toast = None;
-                    let mut toggle_fs = false;
-                    let mut open_request: Option<OpenRequest> = None;
-                    let mut open_jump = false;
-                    let mut always_on_top = self.preferences_state.always_on_top;
-                    Popup::menu(&top_resp.menu_response)
-                        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
-                        .gap(6.0)
-                        .show(|ui| {
-                            MenuBarView::show(
-                                ui,
-                                &mut self.player,
-                                &mut self.playlist,
-                                MenuCtx {
-                                    recent_files: &mut self.session.recent_files,
-                                    open_request: &mut open_request,
-                                    aspect_mode: &mut self.canvas.aspect_mode,
-                                    show_playlist: &mut self.show_playlist,
-                                    show_info: &mut self.show_info,
-                                    show_equalizer: &mut self.show_equalizer,
-                                    show_stream: &mut self.show_stream,
-                                    show_preferences: &mut self.show_preferences,
-                                    show_about: &mut self.show_about,
-                                    show_codecs: &mut self.show_codecs,
-                                    show_shortcuts: &mut self.show_shortcuts,
-                                    open_jump: &mut open_jump,
-                                    ab_loop: &mut self.ab_loop,
-                                    always_on_top: &mut always_on_top,
-                                    toggle_fullscreen: &mut toggle_fs,
-                                    toast_msg: &mut menu_toast,
-                                    prefs: &self.preferences_state,
-                                },
-                            );
-                        });
-
-                    // 2. Artwork
-                    let pad_x = 24.0;
-                    let art_w = card_w - pad_x * 2.0;
-                    let art_h = (art_w * 0.95).min((card_rect.height() - 250.0).max(180.0));
-                    let y_art = card_rect.min.y + 52.0;
-                    let art_rect = Rect::from_min_size(
-                        Pos2::new(card_rect.min.x + pad_x, y_art),
-                        Vec2::new(art_w, art_h),
-                    );
-
-                    let active_cover = self.get_active_cover(&ctx, &cover_tex);
-                    let canvas_resp = self.canvas.show_in_rect(
-                        ui,
-                        art_rect,
-                        active_subtitle.as_deref(),
-                        self.preferences_state.subtitle_size,
-                        is_audio_only,
-                        &visualizer_levels,
-                        Some(&active_cover),
-                    );
-
-                    if canvas_resp.double_clicked() {
-                        self.toggle_fullscreen(&ctx);
-                    } else if canvas_resp.clicked() {
-                        if has_media {
-                            self.player.toggle_play();
-                        } else {
-                            self.open_file_dialog();
-                        }
-                    }
-
-                    // Mouse wheel adjusts volume
-                    if canvas_resp.hovered() && !Popup::is_any_open(&ctx) {
-                        let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
-                        if scroll.abs() > 2.0 {
-                            let delta = if scroll > 0.0 { 0.05 } else { -0.05 };
-                            let new_vol = (self.player.get_volume() + delta).clamp(0.0, 1.5);
-                            self.player.set_volume(new_vol);
-                            self.set_toast(format!("Volume {}%", (new_vol * 100.0).round() as u32));
-                        }
-                    }
-
-                    // 3. Track Info (Title and Artist)
-                    let y_info = art_rect.max.y + 14.0;
-                    let info_rect = Rect::from_min_size(
-                        Pos2::new(card_rect.min.x + pad_x, y_info),
-                        Vec2::new(art_w, 48.0),
-                    );
-                    let mut info_ui = ui.new_child(
-                        egui::UiBuilder::new()
-                            .max_rect(info_rect)
-                            .layout(egui::Layout::top_down(egui::Align::Min)),
-                    );
-                    info_ui.add(
-                        egui::Label::new(
-                            RichText::new(&track_title)
-                                .font(Theme::font_bold(22.0))
-                                .color(Theme::TEXT),
-                        )
-                        .truncate()
-                        .selectable(false),
-                    );
-                    info_ui.add_space(2.0);
-                    info_ui.add(
-                        egui::Label::new(
-                            RichText::new(&track_artist)
-                                .font(Theme::font(14.5))
-                                .color(Theme::TEXT_MUTED),
-                        )
-                        .truncate()
-                        .selectable(false),
-                    );
-
-                    // 4. Controls Area (Seek bar, Timers, Transport buttons, Playlist pill)
-                    let y_ctrls = info_rect.max.y + 10.0;
-                    let ctrls_rect = Rect::from_min_size(
-                        Pos2::new(card_rect.min.x, y_ctrls),
-                        Vec2::new(card_w, (card_rect.max.y - y_ctrls).max(180.0)),
-                    );
-
-                    let mut controls_toast = None;
-                    let hovering_controls = self.controls.show(
-                        ui,
-                        ctrls_rect,
-                        &mut self.player,
-                        &mut self.playlist,
-                        ControlsCtx {
-                            aspect_mode: &mut self.canvas.aspect_mode,
-                            show_playlist: &mut self.show_playlist,
-                            show_info: &mut self.show_info,
-                            show_preferences: &mut self.show_preferences,
-                            show_equalizer: &mut self.show_equalizer,
-                            is_fullscreen: self.is_fullscreen,
-                            toggle_fullscreen: &mut toggle_fs,
-                            toast_msg: &mut controls_toast,
-                            prefs: &mut self.preferences_state,
-                            ab_loop: self.ab_loop,
-                        },
-                    );
-
-                    if let Some(t) = controls_toast {
-                        self.set_toast(t);
-                    }
-                    if hovering_controls {
-                        self.last_mouse_activity = Instant::now();
-                    }
-                    if let Some(t) = menu_toast {
-                        self.set_toast(t);
-                    }
-                    if let Some(req) = open_request {
-                        self.open_paths(req.paths, req.play);
-                    }
-                    if toggle_fs {
-                        self.toggle_fullscreen(&ctx);
-                    }
-                    if open_jump {
-                        self.open_jump_dialog();
-                    }
-                    self.preferences_state.always_on_top = always_on_top;
+                let _ = ui.allocate_rect(full_rect, Sense::hover());
+                let mut screen = ui.new_child(UiBuilder::new().id_salt("screen").max_rect(full_rect));
+                screen.shrink_clip_rect(full_rect);
+                match self.view {
+                    View::Browse => self.browse_screen(&mut screen, &ctx, full_rect, &logo_tex, visualizer_levels),
+                    View::Player => self.player_screen(&mut screen, &ctx, full_rect, active_subtitle.as_deref(), visualizer_levels),
                 }
 
                 // Toast HUD
@@ -961,7 +1155,7 @@ impl eframe::App for AirMediaApp {
                     if elapsed < *duration {
                         let fade_start = duration - 0.4;
                         let alpha = (1.0 - (elapsed - fade_start).max(0.0) / 0.4).clamp(0.0, 1.0);
-                        let pos = Pos2::new(full_rect.center().x, full_rect.min.y + 72.0);
+                        let pos = Pos2::new(full_rect.center().x, full_rect.min.y + 84.0);
                         draw_toast_hud(ui, pos, msg, alpha);
                     } else {
                         self.toast = None;
@@ -995,13 +1189,24 @@ impl eframe::App for AirMediaApp {
         }
         CodecDialog::show(ui, &mut self.codec_state, &mut self.show_codecs);
 
+        if !self.actions.is_empty() {
+            self.run_actions(&ctx);
+        }
+
         if self.last_session_save.elapsed() >= SESSION_SAVE_INTERVAL
             || ctx.input(|i| i.viewport().close_requested())
         {
             self.save_session();
         }
 
-        if self.player.is_playing || self.toast.is_some() || self.codec_state.downloader.is_busy() {
+        let video_on_screen = self.view == View::Player
+            && self.player.media_info.as_ref().is_some_and(|m| m.primary_video_stream().is_some());
+        if self.player.is_playing && video_on_screen {
+            ctx.request_repaint();
+        } else if self.player.is_playing {
+            // Music and the mini player don't need every display refresh.
+            ctx.request_repaint_after(Duration::from_millis(33));
+        } else if self.toast.is_some() || self.codec_state.downloader.is_busy() {
             ctx.request_repaint();
         } else {
             // Keep the auto-hide timer and fades ticking without spinning the CPU.
@@ -1025,7 +1230,6 @@ fn format_clock(secs: f64) -> String {
         format!("{m}:{s:02}")
     }
 }
-
 
 
 fn draw_toast_hud(ui: &mut Ui, center: Pos2, text: &str, alpha: f32) {

@@ -32,6 +32,19 @@ pub enum Icon {
     Search,
     Trash,
     More,
+    ArrowLeft,
+    ChevronLeft,
+    ChevronRight,
+    Check,
+    Info,
+    Back10,
+    Forward10,
+    Speed,
+    Folder,
+    Film,
+    Music,
+    Globe,
+    Expand,
 }
 
 impl Icon {
@@ -190,6 +203,84 @@ impl Icon {
                 painter.circle_filled(p(12.0, 12.0), r, color);
                 painter.circle_filled(p(18.0, 12.0), r, color);
             }
+            Icon::ArrowLeft => {
+                line(p(20.0, 12.0), p(4.5, 12.0));
+                open_path(vec![p(11.0, 5.0), p(4.0, 12.0), p(11.0, 19.0)]);
+            }
+            Icon::ChevronLeft => open_path(vec![p(15.0, 4.5), p(7.5, 12.0), p(15.0, 19.5)]),
+            Icon::ChevronRight => open_path(vec![p(9.0, 4.5), p(16.5, 12.0), p(9.0, 19.5)]),
+            Icon::Check => open_path(vec![p(4.5, 12.5), p(10.0, 18.0), p(19.5, 6.5)]),
+            Icon::Info => {
+                painter.circle_stroke(p(12.0, 12.0), 9.0 * u, stroke);
+                painter.circle_filled(p(12.0, 7.8), 1.2 * u, color);
+                line(p(12.0, 11.0), p(12.0, 17.0));
+            }
+            Icon::Back10 | Icon::Forward10 => {
+                let forward = self == Icon::Forward10;
+                let center = p(12.0, 13.0);
+                let top = -std::f32::consts::FRAC_PI_2;
+                let sweep = 5.2;
+                let (from, to) = if forward { (top, top - sweep) } else { (top, top + sweep) };
+                arc(painter, center, 8.5 * u, from, to, stroke);
+                let (tip, wing_x) = if forward { (13.0, 10.0) } else { (11.0, 14.0) };
+                open_path(vec![p(wing_x, 1.5), p(tip, 4.5), p(wing_x, 7.5)]);
+                painter.text(
+                    center,
+                    egui::Align2::CENTER_CENTER,
+                    "10",
+                    Theme::font_semibold(7.6 * u),
+                    color,
+                );
+            }
+            Icon::Speed => {
+                arc(painter, p(12.0, 14.0), 9.0 * u, 2.65, 6.78, stroke);
+                line(p(12.0, 14.0), p(16.5, 8.5));
+                painter.circle_filled(p(12.0, 14.0), 1.8 * u, color);
+            }
+            Icon::Folder => {
+                open_path(vec![
+                    p(3.0, 18.5),
+                    p(3.0, 5.5),
+                    p(9.5, 5.5),
+                    p(11.5, 8.0),
+                    p(21.0, 8.0),
+                    p(21.0, 18.5),
+                    p(3.0, 18.5),
+                ]);
+            }
+            Icon::Film => {
+                painter.rect_stroke(
+                    Rect::from_min_max(p(3.0, 4.5), p(21.0, 19.5)),
+                    egui::CornerRadius::same((1.8 * u) as u8),
+                    stroke,
+                    egui::StrokeKind::Middle,
+                );
+                line(p(7.5, 4.5), p(7.5, 19.5));
+                line(p(16.5, 4.5), p(16.5, 19.5));
+                line(p(3.0, 12.0), p(21.0, 12.0));
+            }
+            Icon::Music => {
+                open_path(vec![p(9.0, 17.5), p(9.0, 5.5), p(20.0, 3.5), p(20.0, 15.5)]);
+                painter.circle_filled(p(6.5, 17.5), 2.8 * u, color);
+                painter.circle_filled(p(17.5, 15.5), 2.8 * u, color);
+            }
+            Icon::Globe => {
+                painter.circle_stroke(p(12.0, 12.0), 9.0 * u, stroke);
+                line(p(3.0, 12.0), p(21.0, 12.0));
+                let lens: Vec<Pos2> = (0..=24)
+                    .map(|i| {
+                        let t = i as f32 / 24.0 * std::f32::consts::TAU;
+                        Pos2::new(c.x + t.cos() * 4.0 * u, c.y + t.sin() * 9.0 * u)
+                    })
+                    .collect();
+                painter.add(PathShape::line(lens, PathStroke::new(1.8 * u, color)));
+            }
+            Icon::Expand => {
+                open_path(vec![p(13.5, 4.0), p(20.0, 4.0), p(20.0, 10.5)]);
+                open_path(vec![p(10.5, 20.0), p(4.0, 20.0), p(4.0, 13.5)]);
+                line(p(20.0, 4.0), p(13.5, 10.5));
+                line(p(4.0, 20.0), p(10.5, 13.5));
+            }
         }
     }
 }
@@ -262,6 +353,46 @@ pub fn primary_circle_button(ui: &mut Ui, icon: Icon, size: f32, fill_color: Col
         }
         let icon_rect = Rect::from_center_size(icon_center, Vec2::splat(size * 0.44 * pressed));
         icon.paint(painter, icon_rect, icon_color);
+    }
+    resp
+}
+
+/// Look of a [`pill_button`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PillStyle {
+    /// Solid white: the one main action on a screen.
+    Primary,
+    /// Translucent grey: secondary actions.
+    Secondary,
+}
+
+/// The hero-style call-to-action button: optional icon + label on a rounded rectangle.
+pub fn pill_button(ui: &mut Ui, icon: Option<Icon>, label: &str, style: PillStyle, height: f32) -> Response {
+    let font = Theme::font_semibold((height * 0.38).clamp(13.0, 16.5));
+    let fg = if style == PillStyle::Primary { Theme::BG } else { Theme::TEXT };
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), font, fg);
+    let icon_size = height * 0.5;
+    let icon_w = if icon.is_some() { icon_size + height * 0.2 } else { 0.0 };
+    let size = Vec2::new(galley.size().x + icon_w + height * 0.9, height);
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+        let fill = match style {
+            PillStyle::Primary => lerp_color(Theme::TEXT, Color32::from_rgb(214, 214, 222), hover),
+            PillStyle::Secondary => lerp_color(Color32::from_rgb(58, 58, 70), Color32::from_rgb(82, 82, 96), hover),
+        };
+        let painter = ui.painter();
+        painter.rect_filled(rect, Theme::radius_md(), fill);
+        if resp.has_focus() {
+            painter.rect_stroke(rect.expand(2.0), Theme::radius_md(), Stroke::new(2.0, Theme::TEXT), egui::StrokeKind::Outside);
+        }
+        let mut x = rect.min.x + height * 0.45;
+        if let Some(icon) = icon {
+            let r = Rect::from_center_size(Pos2::new(x + icon_size / 2.0, rect.center().y), Vec2::splat(icon_size));
+            icon.paint(painter, r, fg);
+            x += icon_w;
+        }
+        painter.galley(Pos2::new(x, rect.center().y - galley.size().y / 2.0), galley, fg);
     }
     resp
 }

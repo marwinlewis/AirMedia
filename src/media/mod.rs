@@ -287,12 +287,7 @@ impl MediaPlayer {
         let result = self.load_file_inner(path_buf.clone());
         if let Err(e) = &result {
             // Don't keep playing the previous file under the new playlist selection.
-            self.stop();
-            self.current_file = None;
-            self.media_info = None;
-            self.subtitles.clear();
-            self.active_subtitle_track = None;
-            self.embedded_subs_rx = None;
+            self.unload();
             let name = path_buf
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -559,6 +554,17 @@ impl MediaPlayer {
         }
         self.video_decoder.stop();
         self.manual_clock_secs = 0.0;
+    }
+
+    /// Stops playback and forgets the current file, leaving the player idle.
+    pub fn unload(&mut self) {
+        self.stop();
+        self.current_file = None;
+        self.media_info = None;
+        self.duration_secs = 0.0;
+        self.subtitles.clear();
+        self.active_subtitle_track = None;
+        self.embedded_subs_rx = None;
     }
 
     pub fn seek(&mut self, target_secs: f64) {

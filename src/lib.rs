@@ -1,6 +1,7 @@
 pub mod ab_loop;
 pub mod app;
 pub mod app_info;
+pub mod library;
 pub mod media;
 pub mod persistence;
 pub mod playlist;

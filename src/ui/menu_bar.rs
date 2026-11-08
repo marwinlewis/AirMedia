@@ -22,8 +22,8 @@ pub struct OpenRequest {
     pub play: bool,
 }
 
-/// The app menu, shown as a popup from the top-left menu button. Each former menu-bar
-/// category is a submenu.
+/// The full app menu, shown as a popup from the menu button in the navigation bar and the
+/// player. Each category is a submenu.
 pub struct MenuBarView;
 
 pub struct MenuCtx<'a> {
@@ -39,6 +39,7 @@ pub struct MenuCtx<'a> {
     pub show_codecs: &'a mut bool,
     pub show_shortcuts: &'a mut bool,
     pub open_jump: &'a mut bool,
+    pub stop_request: &'a mut bool,
     pub ab_loop: &'a mut AbLoop,
     pub always_on_top: &'a mut bool,
     pub toggle_fullscreen: &'a mut bool,
@@ -68,24 +69,23 @@ impl MenuBarView {
     pub fn show(ui: &mut Ui, player: &mut MediaPlayer, playlist: &mut Playlist, cx: MenuCtx<'_>) {
         ui.set_min_width(220.0);
 
-        let idle = player.current_file.is_none();
-        if item(ui, "Open file…", "Ctrl+O").clicked() {
+        if item(ui, "Open file…", "O").clicked() {
             if let Some(path) = media_dialog().pick_file() {
                 *cx.open_request = Some(OpenRequest { paths: vec![path], play: true });
             }
             ui.close();
         }
 
-        if item(ui, "Open files…", "").clicked() {
+        if item(ui, "Add files…", "").clicked() {
             if let Some(files) = media_dialog().pick_files() {
-                *cx.open_request = Some(OpenRequest { paths: files, play: idle });
+                *cx.open_request = Some(OpenRequest { paths: files, play: false });
             }
             ui.close();
         }
 
-        if item(ui, "Open folder…", "").clicked() {
+        if item(ui, "Add folder…", "").clicked() {
             if let Some(folder) = crate::ui::FileDialog::new().pick_folder() {
-                *cx.open_request = Some(OpenRequest { paths: vec![folder], play: idle });
+                *cx.open_request = Some(OpenRequest { paths: vec![folder], play: false });
             }
             ui.close();
         }
@@ -127,7 +127,7 @@ impl MenuBarView {
                     .add_filter("Playlists", &PLAYLIST_EXTENSIONS)
                     .pick_file()
                 {
-                    *cx.open_request = Some(OpenRequest { paths: vec![path], play: idle });
+                    *cx.open_request = Some(OpenRequest { paths: vec![path], play: false });
                 }
                 ui.close();
             }
@@ -158,7 +158,7 @@ impl MenuBarView {
                 ui.close();
             }
             if item(ui, "Stop", "S").clicked() {
-                player.stop();
+                *cx.stop_request = true;
                 ui.close();
             }
             if item(ui, "Previous", "P").clicked() {

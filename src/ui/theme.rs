@@ -7,39 +7,40 @@ use std::sync::Arc;
 pub struct Theme;
 
 impl Theme {
-    // Surfaces matching the warm dark matte aesthetic in the design
-    pub const BG: Color32 = Color32::from_rgb(22, 21, 20); // #161514
-    pub const SURFACE: Color32 = Color32::from_rgb(28, 26, 25); // #1C1A19
-    pub const CAPSULE_BG: Color32 = Color32::from_rgb(17, 16, 15); // #11100F
+    // Surfaces: near-black with a hint of the navy in the AirMedia icon.
+    pub const BG: Color32 = Color32::from_rgb(13, 13, 18); // #0D0D12
+    pub const SURFACE: Color32 = Color32::from_rgb(24, 24, 32); // #181820
+    pub const SURFACE_HI: Color32 = Color32::from_rgb(36, 36, 47); // #24242F
+    pub const CAPSULE_BG: Color32 = Color32::from_rgb(8, 8, 11); // #08080B
 
-    // Accent: Warm cream / beige from the play button and progress bar
-    pub const ACCENT: Color32 = Color32::from_rgb(237, 224, 208); // #EDE0D0
-    pub const ACCENT_SOFT: Color32 = Color32::from_rgb(245, 239, 230); // #F5EFE6
-    pub const ACCENT_DARK: Color32 = Color32::from_rgb(24, 22, 20); // #181614
+    // Accent: the coral-to-orange of the AirMedia flame.
+    pub const ACCENT: Color32 = Color32::from_rgb(255, 92, 66); // #FF5C42
+    pub const ACCENT_SOFT: Color32 = Color32::from_rgb(255, 150, 84); // #FF9654
+    pub const ACCENT_DARK: Color32 = Color32::from_rgb(24, 10, 8); // #180A08
 
     // Text
-    pub const TEXT: Color32 = Color32::from_rgb(245, 239, 230); // #F5EFE6
-    pub const TEXT_MUTED: Color32 = Color32::from_rgb(163, 155, 145); // #A39B91
-    pub const TEXT_FAINT: Color32 = Color32::from_rgb(112, 106, 99); // #706A63
+    pub const TEXT: Color32 = Color32::from_rgb(255, 255, 255);
+    pub const TEXT_MUTED: Color32 = Color32::from_rgb(184, 184, 196); // #B8B8C4
+    pub const TEXT_FAINT: Color32 = Color32::from_rgb(130, 130, 144); // #828290
 
     // Hairlines & Tracks
-    pub const BORDER: Color32 = Color32::from_rgb(38, 35, 33); // #262321
-    pub const RAIL_BG: Color32 = Color32::from_rgb(46, 43, 40); // #2E2B28
+    pub const BORDER: Color32 = Color32::from_rgb(44, 44, 56); // #2C2C38
+    pub const RAIL_BG: Color32 = Color32::from_rgb(70, 70, 82); // #464652
 
     pub fn radius_sm() -> CornerRadius {
-        CornerRadius::same(8)
+        CornerRadius::same(4)
     }
 
     pub fn radius_md() -> CornerRadius {
-        CornerRadius::same(14)
+        CornerRadius::same(6)
     }
 
     pub fn radius_lg() -> CornerRadius {
-        CornerRadius::same(20)
+        CornerRadius::same(8)
     }
 
     pub fn radius_xl() -> CornerRadius {
-        CornerRadius::same(24)
+        CornerRadius::same(12)
     }
 
     pub fn radius_full() -> CornerRadius {
@@ -69,28 +70,17 @@ impl Theme {
     }
 
     pub fn font_bold(size: f32) -> FontId {
-        FontId::new(size, FontFamily::Name("semibold".into()))
+        FontId::new(size, FontFamily::Name("bold".into()))
     }
 
-    /// Fills `rect` with a top-to-bottom gradient (used for the overlay scrims).
+    /// Fills `rect` with an eased top-to-bottom gradient (used for the overlay scrims).
     pub fn paint_vertical_gradient(painter: &egui::Painter, rect: egui::Rect, top: Color32, bottom: Color32) {
-        let mut mesh = egui::Mesh::default();
-        // A few intermediate stops give a smoother, eased falloff than a single linear ramp.
-        let stops = 6;
-        for i in 0..=stops {
-            let t = i as f32 / stops as f32;
-            let eased = t * t * (3.0 - 2.0 * t);
-            let color = super::icons::lerp_color(top, bottom, eased);
-            let y = egui::lerp(rect.min.y..=rect.max.y, t);
-            mesh.colored_vertex(egui::pos2(rect.min.x, y), color);
-            mesh.colored_vertex(egui::pos2(rect.max.x, y), color);
-            if i > 0 {
-                let b = (i * 2) as u32;
-                mesh.add_triangle(b - 2, b - 1, b);
-                mesh.add_triangle(b - 1, b + 1, b);
-            }
-        }
-        painter.add(egui::Shape::mesh(mesh));
+        paint_gradient(painter, rect, top, bottom, true);
+    }
+
+    /// Fills `rect` with an eased left-to-right gradient.
+    pub fn paint_horizontal_gradient(painter: &egui::Painter, rect: egui::Rect, left: Color32, right: Color32) {
+        paint_gradient(painter, rect, left, right, false);
     }
 
     /// Install fonts and the global look & feel.
@@ -99,6 +89,32 @@ impl Theme {
         let style = build_style();
         ctx.all_styles_mut(|s| *s = style.clone());
     }
+}
+
+fn paint_gradient(painter: &egui::Painter, rect: egui::Rect, from: Color32, to: Color32, vertical: bool) {
+    let mut mesh = egui::Mesh::default();
+    // A few intermediate stops give a smoother, eased falloff than a single linear ramp.
+    let stops = 8;
+    for i in 0..=stops {
+        let t = i as f32 / stops as f32;
+        let eased = t * t * (3.0 - 2.0 * t);
+        let color = super::icons::lerp_color(from, to, eased);
+        if vertical {
+            let y = egui::lerp(rect.min.y..=rect.max.y, t);
+            mesh.colored_vertex(egui::pos2(rect.min.x, y), color);
+            mesh.colored_vertex(egui::pos2(rect.max.x, y), color);
+        } else {
+            let x = egui::lerp(rect.min.x..=rect.max.x, t);
+            mesh.colored_vertex(egui::pos2(x, rect.min.y), color);
+            mesh.colored_vertex(egui::pos2(x, rect.max.y), color);
+        }
+        if i > 0 {
+            let b = (i * 2) as u32;
+            mesh.add_triangle(b - 2, b - 1, b);
+            mesh.add_triangle(b - 1, b + 1, b);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 fn install_fonts(ctx: &egui::Context) {
@@ -111,6 +127,7 @@ fn install_fonts(ctx: &egui::Context) {
 
     let regular = std::fs::read(fonts_dir.join("segoeui.ttf")).ok();
     let semibold = std::fs::read(fonts_dir.join("seguisb.ttf")).ok();
+    let bold = std::fs::read(fonts_dir.join("segoeuib.ttf")).ok();
 
     if let Some(bytes) = regular {
         fonts
@@ -141,6 +158,22 @@ fn install_fonts(ctx: &egui::Context) {
         .families
         .insert(FontFamily::Name("semibold".into()), semibold_family);
 
+    let mut bold_family = Vec::new();
+    if let Some(bytes) = bold {
+        fonts
+            .font_data
+            .insert("ui-bold".into(), Arc::new(FontData::from_owned(bytes)));
+        bold_family.push("ui-bold".to_string());
+    }
+    bold_family.extend(
+        fonts
+            .families
+            .get(&FontFamily::Name("semibold".into()))
+            .cloned()
+            .unwrap_or_default(),
+    );
+    fonts.families.insert(FontFamily::Name("bold".into()), bold_family);
+
     ctx.set_fonts(fonts);
 }
 
@@ -170,12 +203,13 @@ fn build_style() -> Style {
     spacing.combo_width = 160.0;
     spacing.icon_width = 16.0;
     spacing.icon_width_inner = 8.0;
+    spacing.scroll = egui::style::ScrollStyle::floating();
 
     let mut v = Visuals::dark();
     v.panel_fill = Theme::BG;
     v.window_fill = Theme::SURFACE;
     v.window_stroke = Stroke::new(1.0, Theme::BORDER);
-    v.window_corner_radius = Theme::radius_lg();
+    v.window_corner_radius = Theme::radius_xl();
     v.window_shadow = Shadow {
         offset: [0, 16],
         blur: 40,
@@ -188,7 +222,7 @@ fn build_style() -> Style {
         spread: 0,
         color: Theme::black(140),
     };
-    v.menu_corner_radius = Theme::radius_md();
+    v.menu_corner_radius = Theme::radius_lg();
     v.extreme_bg_color = Theme::CAPSULE_BG;
     v.faint_bg_color = Theme::white(6);
     v.text_edit_bg_color = Some(Theme::CAPSULE_BG);
@@ -200,7 +234,7 @@ fn build_style() -> Style {
     v.striped = false;
 
     v.selection.bg_fill = Theme::ACCENT;
-    v.selection.stroke = Stroke::new(1.0, Theme::ACCENT_DARK);
+    v.selection.stroke = Stroke::new(1.0, Theme::TEXT);
 
     let radius = Theme::radius_sm();
     let w = &mut v.widgets;

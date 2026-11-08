@@ -44,7 +44,7 @@ const fn hint(keys: &'static str, action: &'static str, group: Group, label: &'s
 
 pub const SHORTCUTS: &[Shortcut] = &[
     sc("Space", "Play / Pause", Group::Playback),
-    sc("S", "Stop playback", Group::Playback),
+    sc("S", "Stop and return to the library", Group::Playback),
     sc("N / P", "Next / Previous track in playlist", Group::Playback),
     sc("Media keys", "Play/Pause, Stop, Next and Previous track", Group::Playback),
     sc(".", "Step 1 frame forward", Group::Playback),
@@ -69,9 +69,10 @@ pub const SHORTCUTS: &[Shortcut] = &[
     sc("Drag", "Reorder playlist items", Group::Playlist),
     hint("O", "Open media file", Group::Window, "open"),
     sc("Ctrl + N", "Open network stream", Group::Window),
+    sc("Ctrl + F", "Search the library", Group::Window),
     hint("F or F11", "Toggle fullscreen", Group::Window, "fullscreen"),
     sc("Double click", "Toggle fullscreen", Group::Window),
-    sc("Esc", "Exit fullscreen / close dialog", Group::Window),
+    sc("Esc", "Close dialog / exit fullscreen / back to the library", Group::Window),
     sc("Ctrl + T", "Toggle always on top", Group::Window),
     sc("I", "Media information", Group::Window),
     sc("Ctrl + P", "Preferences", Group::Window),

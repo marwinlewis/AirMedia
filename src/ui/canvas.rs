@@ -1,8 +1,9 @@
+use super::artwork::{paint_cover, ArtworkCache};
 use super::theme::Theme;
+use crate::library::MediaKind;
 use crate::media::decoder::VideoFrame;
-use eframe::egui::{
-    self, Color32, FontFamily, FontId, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2,
-};
+use eframe::egui::{self, Color32, CornerRadius, FontFamily, FontId, Pos2, Rect, Response, Sense, Ui, Vec2};
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AspectRatioMode {
@@ -62,6 +63,16 @@ pub struct VideoCanvas {
     last_frame_dims: Option<(u32, u32)>,
 }
 
+/// What the audio stage shows for the current track.
+pub struct AudioStage<'a> {
+    pub path: &'a Path,
+    pub title: &'a str,
+    pub subtitle: &'a str,
+    pub levels: &'a [f32; 16],
+    /// Space kept free at the bottom for the player controls.
+    pub bottom_inset: f32,
+}
+
 impl VideoCanvas {
     pub fn new() -> Self {
         Self {
@@ -92,88 +103,86 @@ impl VideoCanvas {
         }
     }
 
-    /// Renders the artwork/video container inside a specified `rect`:
-    /// - If video is playing, renders video frame in `rect`
-    /// - If audio or idle, renders the album cover / mountain artwork with rounded corners
-    pub fn show_in_rect(
+    /// Forgets the last frame so a new file never starts by flashing the previous one.
+    pub fn clear(&mut self) {
+        self.texture = None;
+        self.last_frame_dims = None;
+    }
+
+    /// Edge-to-edge video on black. `subtitle_lift` raises subtitles above visible controls.
+    pub fn show_video(
         &mut self,
         ui: &mut Ui,
         rect: Rect,
         subtitle_text: Option<&str>,
         subtitle_size: f32,
-        is_audio_only: bool,
-        visualizer_levels: &[f32; 16],
-        cover_texture: Option<&egui::TextureHandle>,
+        subtitle_lift: f32,
     ) -> Response {
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
 
-        // Fill background container
-        painter.rect_filled(rect, Theme::radius_lg(), Theme::SURFACE);
-
-        if let (Some(tex), false) = (&self.texture, is_audio_only) {
-            let (frame_w, frame_h) = self.last_frame_dims.unwrap_or((1920, 1080));
-            let target_rect = compute_target_rect(
-                rect,
-                frame_w as f32,
-                frame_h as f32,
-                self.aspect_mode,
-            );
-
-            // Render video texture
-            let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
-            painter.image(tex.id(), target_rect, uv, Color32::WHITE);
-        } else if let Some(cover_tex) = cover_texture {
-            // Render the cover artwork matching the design
-            let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
-            painter.image(cover_tex.id(), rect, uv, Color32::WHITE);
-
-            // If audio is actively playing, draw subtle audio visualizer glow on bottom
-            if is_audio_only {
-                let any_sound = visualizer_levels.iter().any(|&l| l > 0.02);
-                if any_sound {
-                    draw_audio_wave_overlay(&painter, rect, visualizer_levels);
-                }
+        match &self.texture {
+            Some(tex) => {
+                let (frame_w, frame_h) = self.last_frame_dims.unwrap_or((1920, 1080));
+                let target = compute_target_rect(rect, frame_w as f32, frame_h as f32, self.aspect_mode);
+                let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+                painter.image(tex.id(), target, uv, Color32::WHITE);
             }
-        } else {
-            draw_idle_or_audio_canvas(&painter, rect, is_audio_only, visualizer_levels);
+            None => {
+                // First frame still on its way.
+                let spinner = Rect::from_center_size(rect.center(), Vec2::splat(44.0));
+                ui.put(spinner, egui::Spinner::new().size(44.0).color(Theme::ACCENT));
+            }
         }
-
-        // Draw elegant rounded border
-        painter.rect_stroke(
-            rect,
-            Theme::radius_lg(),
-            Stroke::new(1.0, Theme::BORDER),
-            Theme::stroke_kind(),
-        );
 
         if let Some(sub) = subtitle_text {
-            draw_subtitle_overlay(&painter, rect, sub, subtitle_size);
+            draw_subtitle_overlay(&painter, rect, sub, subtitle_size, subtitle_lift);
         }
-
         response
     }
 
-    pub fn show(
-        &mut self,
-        ui: &mut Ui,
-        subtitle_text: Option<&str>,
-        subtitle_size: f32,
-        is_audio_only: bool,
-        visualizer_levels: &[f32; 16],
-    ) -> Response {
-        let available_size = ui.available_size();
-        let (rect, _) = ui.allocate_exact_size(available_size, Sense::hover());
-        self.show_in_rect(
-            ui,
-            rect,
-            subtitle_text,
-            subtitle_size,
-            is_audio_only,
-            visualizer_levels,
-            None,
-        )
+    /// The screen for audio-only media: dimmed artwork filling the window, the artwork itself,
+    /// the title and a spectrum visualizer.
+    pub fn show_audio(&mut self, ui: &mut Ui, rect: Rect, art: &mut ArtworkCache, stage: AudioStage<'_>) -> Response {
+        let response = ui.allocate_rect(rect, Sense::click_and_drag());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, CornerRadius::ZERO, Theme::BG);
+
+        let tex = art.texture(stage.path);
+        if let Some(tex) = &tex {
+            paint_cover(&painter, rect, CornerRadius::ZERO, tex, Color32::from_gray(70));
+        }
+        Theme::paint_vertical_gradient(&painter, rect, Theme::BG.gamma_multiply(0.45), Theme::BG.gamma_multiply(0.97));
+
+        let usable_h = (rect.height() - stage.bottom_inset - 70.0).max(120.0);
+        let tile_h = (usable_h - 130.0).clamp(90.0, 340.0).min(rect.width() - 48.0);
+        let block_h = tile_h + 92.0;
+        let top = rect.min.y + 56.0 + ((usable_h - block_h) / 2.0).max(0.0);
+        let tile = Rect::from_center_size(Pos2::new(rect.center().x, top + tile_h / 2.0), Vec2::splat(tile_h));
+
+        painter.rect_filled(tile.translate(Vec2::new(0.0, 10.0)).expand(6.0), Theme::radius_xl(), Theme::black(70));
+        match &tex {
+            Some(tex) => paint_cover(&painter, tile, Theme::radius_lg(), tex, Color32::WHITE),
+            None => art.paint_placeholder(&painter, tile, Theme::radius_lg(), stage.title, MediaKind::Audio),
+        }
+
+        let max_w = (rect.width() - 48.0).max(100.0);
+        let text_y = tile.max.y + 20.0;
+        let title = truncated(&painter, stage.title, Theme::font_bold(24.0), Theme::TEXT, max_w);
+        painter.galley(Pos2::new(rect.center().x - title.size().x / 2.0, text_y), title, Theme::TEXT);
+        let sub = truncated(&painter, stage.subtitle, Theme::font(14.5), Theme::TEXT_MUTED, max_w);
+        painter.galley(Pos2::new(rect.center().x - sub.size().x / 2.0, text_y + 34.0), sub, Theme::TEXT_MUTED);
+
+        draw_visualizer(&painter, rect, stage.levels, stage.bottom_inset);
+        response
     }
+}
+
+fn truncated(painter: &egui::Painter, text: &str, font: FontId, color: Color32, max_w: f32) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_w);
+    painter.layout_job(job)
 }
 
 fn compute_target_rect(
@@ -223,27 +232,25 @@ fn compute_target_rect(
     }
 }
 
-fn draw_audio_wave_overlay(painter: &egui::Painter, rect: Rect, levels: &[f32; 16]) {
-    let n = levels.len();
-    let bar_w = 4.0;
-    let gap = 3.0;
-    let total_w = n as f32 * bar_w + (n as f32 - 1.0) * gap;
-    let start_x = rect.center().x - total_w / 2.0;
-    let bottom_y = rect.max.y - 14.0;
-
+fn draw_visualizer(painter: &egui::Painter, rect: Rect, levels: &[f32; 16], bottom_inset: f32) {
+    if !levels.iter().any(|&l| l > 0.02) {
+        return;
+    }
+    let n = levels.len() as f32;
+    let (bar_w, gap) = (5.0, 4.0);
+    let start_x = rect.center().x - (n * bar_w + (n - 1.0) * gap) / 2.0;
+    let bottom_y = rect.max.y - bottom_inset - 6.0;
     for (i, &lvl) in levels.iter().enumerate() {
-        let h = (lvl * 36.0).clamp(2.0, 32.0);
+        let h = (lvl * 40.0).clamp(2.0, 36.0);
         let x = start_x + i as f32 * (bar_w + gap);
-        let bar = Rect::from_min_max(
-            Pos2::new(x, bottom_y - h),
-            Pos2::new(x + bar_w, bottom_y),
-        );
-        let color = Color32::from_rgba_premultiplied(237, 224, 208, 180);
+        let bar = Rect::from_min_max(Pos2::new(x, bottom_y - h), Pos2::new(x + bar_w, bottom_y));
+        let t = i as f32 / (n - 1.0);
+        let color = super::icons::lerp_color(Theme::ACCENT, Theme::ACCENT_SOFT, t);
         painter.rect_filled(bar, Theme::radius_full(), color);
     }
 }
 
-fn draw_subtitle_overlay(painter: &egui::Painter, canvas_rect: Rect, text: &str, font_size: f32) {
+fn draw_subtitle_overlay(painter: &egui::Painter, canvas_rect: Rect, text: &str, font_size: f32, lift: f32) {
     if text.trim().is_empty() {
         return;
     }
@@ -255,39 +262,9 @@ fn draw_subtitle_overlay(painter: &egui::Painter, canvas_rect: Rect, text: &str,
 
     let pad = Vec2::new(14.0, 6.0);
     let size = galley.size() + pad * 2.0;
-    let bottom = canvas_rect.max.y - (canvas_rect.height() * 0.08).max(48.0);
+    let bottom = canvas_rect.max.y - (canvas_rect.height() * 0.08).max(48.0).max(lift);
     let bg = Rect::from_min_size(Pos2::new(canvas_rect.center().x - size.x / 2.0, bottom - size.y), size);
 
     painter.rect_filled(bg, Theme::radius_sm(), Theme::black(150));
     painter.galley(Pos2::new(bg.center().x, bg.min.y + pad.y), galley, Color32::WHITE);
-}
-
-fn draw_idle_or_audio_canvas(
-    painter: &egui::Painter,
-    rect: Rect,
-    is_audio: bool,
-    levels: &[f32; 16],
-) {
-    if !is_audio {
-        return;
-    }
-
-    let center = rect.center();
-    let bar_w = 8.0;
-    let gap = 6.0;
-    let n = levels.len();
-    let total_w = n as f32 * bar_w + (n as f32 - 1.0) * gap;
-    let start_x = center.x - total_w / 2.0;
-
-    for (i, &lvl) in levels.iter().enumerate() {
-        let h = (lvl * 160.0).clamp(6.0, 150.0);
-        let x = start_x + i as f32 * (bar_w + gap);
-        let bar = Rect::from_min_max(
-            Pos2::new(x, center.y - h / 2.0),
-            Pos2::new(x + bar_w, center.y + h / 2.0),
-        );
-        let t = i as f32 / (n - 1) as f32;
-        let color = super::icons::lerp_color(Theme::ACCENT, Theme::ACCENT_SOFT, t);
-        painter.rect_filled(bar, Theme::radius_full(), color);
-    }
 }

@@ -181,6 +181,20 @@ impl Playlist {
         self.next()
     }
 
+    /// What auto-advance will play after the current item, without moving there. `None` when
+    /// that isn't knowable (shuffle) or nothing follows.
+    pub fn peek_next(&self) -> Option<&PlaylistItem> {
+        if self.is_shuffle || self.repeat_mode == RepeatMode::One {
+            return None;
+        }
+        let cur = self.current_index?;
+        match self.items.get(cur + 1) {
+            Some(item) => Some(item),
+            None if self.repeat_mode == RepeatMode::All && self.items.len() > 1 => self.items.first(),
+            None => None,
+        }
+    }
+
     /// Manual "Next": always moves to another item (Repeat-One only affects auto-advance).
     pub fn next(&mut self) -> Option<&PlaylistItem> {
         if self.items.is_empty() {
