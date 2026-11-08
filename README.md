@@ -3,6 +3,21 @@
 
 AirMedia is an ultra-fast, modern media player designed to deliver the rich feature set of VLC while staying exceptionally lightweight (<13 MB binary, starts up in milliseconds, negligible RAM usage). It leverages modern hardware acceleration technologies to run video and audio decoding and presentation directly on the GPU.
 
+![AirMedia home screen with a featured banner and a row of items to resume](docs/screenshots/home.png)
+
+---
+
+## 📸 Screenshots
+
+| | |
+|---|---|
+| ![Video player with the seek bar and transport controls](docs/screenshots/player.png) **Player** | ![Settings menu with speed, picture and hardware decoder options](docs/screenshots/settings.png) **Playback settings** |
+| ![Playlist drawer open beside the video](docs/screenshots/playlist.png) **Playlist drawer** | ![Library with the mini player docked at the bottom](docs/screenshots/miniplayer.png) **Mini player** |
+| ![Videos page showing a grid of thumbnails with progress bars](docs/screenshots/videos.png) **Videos** | ![Details overlay with artwork, metadata, Resume and Start Over](docs/screenshots/details.png) **Details** |
+| ![Music view with cover art, title and artist](docs/screenshots/music-player.png) **Music** | ![Effects dialog showing the 10-band equalizer](docs/screenshots/equalizer.png) **Equalizer** |
+
+<sub>Shown with synthetic demo clips and tones generated with ffmpeg.</sub>
+
 ---
 
 ## 🌟 Modern Architecture & Technologies
