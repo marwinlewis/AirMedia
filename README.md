@@ -125,9 +125,9 @@ Press `?` or `F1` in the player for the same list. The table is generated from `
 
 ---
 
-## 🎨 Asset Generation (`dist/airmedia.png`)
+## 🎨 Asset Generation (`dist/airmedia.svg`)
 
-AirMedia includes an automated asset generation engine that derives all multi-platform icons, macOS ICNS bundles, Windows ICO frames, Linux hicolor themes, and Android mipmap packages directly from the high-resolution source icon at `dist/airmedia.png`:
+AirMedia includes an automated asset generation engine that rasterizes all multi-platform icons, macOS ICNS bundles, Windows ICO frames, Linux hicolor themes, and Android mipmap packages directly from the vector source icon at `dist/airmedia.svg`:
 
 ```bash
 # Via Cargo example

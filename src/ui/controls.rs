@@ -5,12 +5,13 @@ use super::canvas::AspectRatioMode;
 use super::icons::{pill_button, Icon, PillStyle};
 use super::preferences_dialog::PreferencesState;
 use super::theme::Theme;
+use super::window_chrome;
 use crate::media::decoder::HwAccelMode;
 use crate::media::MediaPlayer;
 use crate::playlist::RepeatMode;
 use eframe::egui::{
-    self, text::LayoutJob, text::TextWrapping, Align2, Popup, PopupCloseBehavior, Pos2, Rect, RectAlign, Response, RichText, Sense, Ui,
-    UiBuilder, Vec2,
+    self, text::LayoutJob, text::TextWrapping, Align2, Id, Popup, PopupCloseBehavior, Pos2, Rect, RectAlign, Response, RichText, Sense,
+    Ui, UiBuilder, Vec2,
 };
 use std::time::Instant;
 
@@ -76,38 +77,52 @@ impl ControlsView {
         }
     }
 
-    /// Paints the controls over `area`, faded by `opacity` (0 = hidden, nothing interactive).
-    pub fn show(&mut self, ui: &mut Ui, area: Rect, opacity: f32, player: &mut MediaPlayer, mut cx: ControlsCtx<'_>) -> Option<ControlsOutput> {
+    /// Paints the controls over `area` (and top header across `top_area`), faded by `opacity` (0 = hidden, nothing interactive).
+    pub fn show(&mut self, ui: &mut Ui, area: Rect, top_area: Rect, opacity: f32, player: &mut MediaPlayer, mut cx: ControlsCtx<'_>) -> Option<ControlsOutput> {
         self.up_next_shortcut(ui, area, opacity, player, &mut cx);
         if opacity <= 0.001 {
             return None;
         }
 
-        let mut layer = ui.new_child(UiBuilder::new().id_salt("player_controls").max_rect(area));
+        let layer_rect = area.union(top_area);
+        let mut layer = ui.new_child(UiBuilder::new().id_salt("player_controls").max_rect(layer_rect));
         layer.multiply_opacity(opacity);
-        layer.shrink_clip_rect(area);
+        layer.shrink_clip_rect(layer_rect);
         layer.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
 
-        let top = Rect::from_min_size(area.min, Vec2::new(area.width(), TOP_BAR_H));
+        let top_grad = Rect::from_min_size(area.min, Vec2::new(area.width(), TOP_BAR_H));
+        let top_bar = Rect::from_min_size(top_area.min, Vec2::new(top_area.width(), super::browse::NAV_HEIGHT));
         let bottom = Rect::from_min_max(Pos2::new(area.min.x, area.max.y - BOTTOM_CONTROLS_H - 44.0), area.max);
         let painter = layer.painter().clone();
-        Theme::paint_vertical_gradient(&painter, top.with_max_y(top.max.y + 36.0), Theme::black(225), Theme::black(0));
+        Theme::paint_vertical_gradient(&painter, top_grad.with_max_y(top_grad.max.y + 36.0), Theme::black(225), Theme::black(0));
         Theme::paint_vertical_gradient(&painter, bottom, Theme::black(0), Theme::black(225));
 
-        let pad = (area.width() * 0.025).clamp(10.0, 28.0);
+        window_chrome::handle_titlebar_drag(&mut layer, top_bar, Id::unique("player_top_drag"), cx.is_fullscreen);
 
-        // --- Top: back, title, menu ---
-        let row = Rect::from_min_size(area.min + Vec2::new(pad, 12.0), Vec2::new(area.width() - pad * 2.0, 44.0));
+        let pad = (area.width() * 0.025).clamp(10.0, 28.0);
+        let top_pad = (top_area.width() * 0.025).clamp(10.0, 28.0);
+
+        // --- Top: back, title, menu, custom window controls ---
+        let row = Rect::from_min_size(top_area.min + Vec2::new(top_pad, 12.0), Vec2::new(top_area.width() - top_pad * 2.0, 44.0));
         let mut top_ui = layer.new_child(UiBuilder::new().id_salt("player_top").max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
         if icon_button_big(&mut top_ui, Icon::ArrowLeft, 44.0).on_hover_text("Back to library (Esc)").clicked() {
             *cx.go_back = true;
         }
+        let right_reserve = window_chrome::right_reserve(top_area.width(), cx.is_fullscreen);
+        let menu_max_x = if right_reserve > 0.0 {
+            top_area.max.x - right_reserve
+        } else {
+            row.max.x
+        };
+        let menu_row = Rect::from_min_max(row.min, Pos2::new(menu_max_x.max(row.min.x + 40.0), row.max.y));
         let menu = {
-            let mut right = top_ui.new_child(UiBuilder::new().id_salt("player_top_right").max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Center)));
+            let mut right = top_ui.new_child(UiBuilder::new().id_salt("player_top_right").max_rect(menu_row).layout(egui::Layout::right_to_left(egui::Align::Center)));
             icon_button_big(&mut right, Icon::Menu, 40.0).on_hover_text("Menu")
         };
-        let text_max = (row.width() - 44.0 - 40.0 - 28.0).max(60.0);
+        window_chrome::show_window_controls(&mut layer, top_bar, cx.is_fullscreen);
+
         let text_x = row.min.x + 44.0 + 12.0;
+        let text_max = (menu_max_x - text_x - 48.0).max(60.0);
         let text_line = |text: &str, font, color| {
             let mut job = LayoutJob::simple_singleline(text.to_owned(), font, color);
             job.wrap = TextWrapping::truncate_at_width(text_max);
@@ -262,7 +277,8 @@ impl ControlsView {
             }
         }
 
-        let hovered = layer.rect_contains_pointer(top) || layer.rect_contains_pointer(Rect::from_min_max(Pos2::new(area.min.x, area.max.y - BOTTOM_CONTROLS_H), area.max));
+        let top_hover = Rect::from_min_size(top_area.min, Vec2::new(top_area.width(), TOP_BAR_H));
+        let hovered = layer.rect_contains_pointer(top_hover) || layer.rect_contains_pointer(Rect::from_min_max(Pos2::new(area.min.x, area.max.y - BOTTOM_CONTROLS_H), area.max));
         Some(ControlsOutput { hovered: hovered || self.is_seeking, menu })
     }
 

@@ -4,7 +4,9 @@
 use super::artwork::{paint_cover, ArtworkCache};
 use super::controls::{menu_row, option_row};
 use super::icons::{lerp_color, pill_button, primary_circle_button, Icon, PillStyle};
+use super::logo::{LogoCache, LogoVariant};
 use super::theme::Theme;
+use super::window_chrome;
 use crate::library::{FeaturedReason, Library, LibraryEntry, MediaKind, format_duration_short};
 use crate::persistence::SessionState;
 use eframe::egui::{
@@ -76,15 +78,17 @@ pub struct BrowseCx<'a> {
     pub up_next: Option<&'a Path>,
     pub playlist_len: usize,
     pub playlist_open: bool,
+    pub is_fullscreen: bool,
     /// The current video frame, so the banner can show what is really playing.
     pub live_frame: Option<&'a TextureHandle>,
-    pub logo: &'a TextureHandle,
+    pub logo: &'a mut LogoCache,
     pub levels: [f32; 16],
     pub actions: &'a mut Vec<BrowseAction>,
 }
 
-/// Paints the whole screen into `rect`; returns the app-menu button so the app can attach its menu.
-pub fn show(ui: &mut Ui, rect: Rect, state: &mut BrowseState, cx: &mut BrowseCx<'_>) -> Response {
+/// Paints the whole screen into `rect` and the top navigation bar across `nav_rect`; returns the
+/// app-menu button so the app can attach its menu.
+pub fn show(ui: &mut Ui, rect: Rect, nav_rect: Rect, state: &mut BrowseState, cx: &mut BrowseCx<'_>) -> Response {
     let mut page = ui.new_child(UiBuilder::new().max_rect(rect).id_salt("browse_page"));
     page.shrink_clip_rect(rect);
     page.spacing_mut().item_spacing = Vec2::ZERO;
@@ -128,7 +132,7 @@ pub fn show(ui: &mut Ui, rect: Rect, state: &mut BrowseState, cx: &mut BrowseCx<
         });
     state.scroll_y = output.state.clamped_offset().y;
 
-    navigation(ui, rect, state, cx)
+    navigation(ui, nav_rect, state, cx)
 }
 
 fn page_padding(width: f32) -> f32 {
@@ -156,20 +160,23 @@ fn navigation(ui: &mut Ui, rect: Rect, state: &mut BrowseState, cx: &mut BrowseC
     Theme::paint_vertical_gradient(&painter, nav, Theme::black(190), Theme::black(0));
     painter.rect_filled(nav, CornerRadius::ZERO, Theme::BG.gamma_multiply(solid));
 
-    // Swallow clicks so cards scrolled under the bar can't be hit through it.
-    let _ = ui.interact(nav, Id::unique("browse_nav_block"), Sense::click());
+    // Swallow clicks so cards scrolled under the bar can't be hit through it, and allow window drag.
+    window_chrome::handle_titlebar_drag(ui, nav, Id::unique("browse_nav_block"), cx.is_fullscreen);
 
-    let pad = page_padding(rect.width());
-    let compact = rect.width() < 760.0;
+    let narrow = nav.width() < 600.0;
+    let compact = nav.width() < 760.0;
+    let pad = if narrow { 12.0 } else { page_padding(nav.width()) };
     let cy = nav.center().y;
 
     // Brand
-    let logo_rect = Rect::from_center_size(Pos2::new(nav.min.x + pad + 18.0, cy), Vec2::splat(36.0));
-    let tex = egui::load::SizedTexture::from_handle(cx.logo);
+    let logo_size = if narrow { 32.0 } else { 36.0 };
+    let logo_rect = Rect::from_center_size(Pos2::new(nav.min.x + pad + logo_size * 0.5, cy), Vec2::splat(logo_size));
+    let logo_tex = cx.logo.texture(ui.ctx(), LogoVariant::Badge, logo_size);
+    let tex = egui::load::SizedTexture::from_handle(&logo_tex);
     egui::Image::new(tex)
         .corner_radius(CornerRadius::same(8))
         .paint_at(ui, logo_rect);
-    let mut x = logo_rect.max.x + 10.0;
+    let mut x = logo_rect.max.x + if narrow { 6.0 } else { 10.0 };
     if !compact {
         let wordmark = painter.layout_no_wrap("AirMedia".to_owned(), Theme::font_bold(21.0), Theme::TEXT);
         painter.galley(Pos2::new(x, cy - wordmark.size().y / 2.0), wordmark.clone(), Theme::TEXT);
@@ -183,34 +190,46 @@ fn navigation(ui: &mut Ui, rect: Rect, state: &mut BrowseState, cx: &mut BrowseC
         state.tab = BrowseTab::Home;
         state.close_search();
     }
-    x += if compact { 8.0 } else { 26.0 };
+    x += if narrow { 6.0 } else if compact { 8.0 } else { 26.0 };
 
-    // Tabs
-    for (tab, label) in [(BrowseTab::Home, "Home"), (BrowseTab::Videos, "Videos"), (BrowseTab::Music, "Music")] {
-        let active = state.tab == tab && state.search_query.trim().is_empty();
-        let font = if active { Theme::font_semibold(14.5) } else { Theme::font(14.5) };
-        let galley = painter.layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
-        let tab_rect = Rect::from_min_size(Pos2::new(x, cy - 18.0), Vec2::new(galley.size().x + 20.0, 36.0));
-        let resp = ui
-            .interact(tab_rect, Id::unique(("browse_tab", label)), Sense::click())
-            .on_hover_cursor(egui::CursorIcon::PointingHand);
-        let color = if active || resp.hovered() { Theme::TEXT } else { Theme::TEXT_MUTED };
-        painter.galley(tab_rect.center() - galley.size() / 2.0, galley.clone(), color);
-        if active {
-            let w = galley.size().x;
-            let bar = Rect::from_center_size(Pos2::new(tab_rect.center().x, tab_rect.max.y - 2.0), Vec2::new(w, 2.5));
-            painter.rect_filled(bar, Theme::radius_full(), Theme::ACCENT);
+    // Tabs (hidden at narrow widths while the search field is expanded so typing has room)
+    if !(narrow && state.search_open) {
+        let tab_pad = if narrow { 12.0 } else { 20.0 };
+        for (tab, label) in [(BrowseTab::Home, "Home"), (BrowseTab::Videos, "Videos"), (BrowseTab::Music, "Music")] {
+            let active = state.tab == tab && state.search_query.trim().is_empty();
+            let font = if active { Theme::font_semibold(14.5) } else { Theme::font(14.5) };
+            let galley = painter.layout_no_wrap(label.to_owned(), font, Color32::PLACEHOLDER);
+            let tab_rect = Rect::from_min_size(Pos2::new(x, cy - 18.0), Vec2::new(galley.size().x + tab_pad, 36.0));
+            let resp = ui
+                .interact(tab_rect, Id::unique(("browse_tab", label)), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            let color = if active || resp.hovered() { Theme::TEXT } else { Theme::TEXT_MUTED };
+            painter.galley(tab_rect.center() - galley.size() / 2.0, galley.clone(), color);
+            if active {
+                let w = galley.size().x;
+                let bar = Rect::from_center_size(Pos2::new(tab_rect.center().x, tab_rect.max.y - 2.0), Vec2::new(w, 2.5));
+                painter.rect_filled(bar, Theme::radius_full(), Theme::ACCENT);
+            }
+            if resp.clicked() {
+                state.tab = tab;
+                state.close_search();
+            }
+            x += tab_rect.width();
         }
-        if resp.clicked() {
-            state.tab = tab;
-            state.close_search();
-        }
-        x += tab_rect.width();
     }
 
-    // Right-hand tools, laid out from the edge inward.
-    let tools_min_x = x + 8.0;
-    let tools = Rect::from_min_max(Pos2::new(tools_min_x, nav.min.y), Pos2::new(nav.max.x - pad + 6.0, nav.max.y));
+    // Right-hand tools, shifted left when custom window controls occupy the right corner.
+    let tools_min_x = x + 6.0;
+    let right_reserve = window_chrome::right_reserve(nav.width(), cx.is_fullscreen);
+    let tools_max_x = if right_reserve > 0.0 {
+        nav.max.x - right_reserve
+    } else {
+        nav.max.x - pad + 6.0
+    };
+    let tools = Rect::from_min_max(
+        Pos2::new(tools_min_x.min(tools_max_x), nav.min.y),
+        Pos2::new(tools_max_x, nav.max.y),
+    );
     let mut tools_ui = ui.new_child(
         UiBuilder::new()
             .id_salt("browse_tools")
@@ -219,9 +238,10 @@ fn navigation(ui: &mut Ui, rect: Rect, state: &mut BrowseState, cx: &mut BrowseC
     );
     tools_ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
 
-    let menu_resp = super::controls::icon_button_big(&mut tools_ui, Icon::Menu, 38.0).on_hover_text("Menu");
+    let btn_size = if narrow { 34.0 } else { 38.0 };
+    let menu_resp = super::controls::icon_button_big(&mut tools_ui, Icon::Menu, btn_size).on_hover_text("Menu");
 
-    let playlist_resp = super::controls::icon_button_ex_big(&mut tools_ui, Icon::Playlist, 38.0, cx.playlist_open)
+    let playlist_resp = super::controls::icon_button_ex_big(&mut tools_ui, Icon::Playlist, btn_size, cx.playlist_open)
         .on_hover_text("Playlist (L)");
     if cx.playlist_len > 0 {
         let label = if cx.playlist_len > 99 { "99+".to_string() } else { cx.playlist_len.to_string() };
@@ -236,7 +256,7 @@ fn navigation(ui: &mut Ui, rect: Rect, state: &mut BrowseState, cx: &mut BrowseC
     }
 
     let open_resp = if compact {
-        super::controls::icon_button_big(&mut tools_ui, Icon::Plus, 38.0).on_hover_text("Open media")
+        super::controls::icon_button_big(&mut tools_ui, Icon::Plus, btn_size).on_hover_text("Open media")
     } else {
         tools_ui.add_space(6.0);
         let r = pill_button(&mut tools_ui, Some(Icon::Plus), "Open", PillStyle::Secondary, 34.0).on_hover_text("Open media");
@@ -262,7 +282,7 @@ fn navigation(ui: &mut Ui, rect: Rect, state: &mut BrowseState, cx: &mut BrowseC
 
     // Search: an icon that expands into a field.
     if state.search_open {
-        let field_w = (tools_ui.available_width() - 8.0).clamp(90.0, 260.0);
+        let field_w = (tools_ui.available_width() - 8.0).clamp(64.0, 260.0);
         let (field, _) = tools_ui.allocate_exact_size(Vec2::new(field_w, 34.0), Sense::hover());
         let fp = tools_ui.painter();
         fp.rect(field, Theme::radius_sm(), Theme::black(170), Stroke::new(1.0, Theme::white(110)), StrokeKind::Inside);
@@ -288,9 +308,11 @@ fn navigation(ui: &mut Ui, rect: Rect, state: &mut BrowseState, cx: &mut BrowseC
         if x_resp.clicked() {
             state.close_search();
         }
-    } else if super::controls::icon_button_big(&mut tools_ui, Icon::Search, 38.0).on_hover_text("Search (Ctrl+F)").clicked() {
+    } else if super::controls::icon_button_big(&mut tools_ui, Icon::Search, btn_size).on_hover_text("Search (Ctrl+F)").clicked() {
         state.open_search();
     }
+
+    window_chrome::show_window_controls(ui, nav, cx.is_fullscreen);
 
     menu_resp
 }
@@ -440,13 +462,10 @@ fn welcome(ui: &mut Ui, view_h: f32, cx: &mut BrowseCx<'_>) {
     if width > 680.0 {
         let size = (rect.height() * 1.15).min(width * 0.8);
         let backdrop = Rect::from_center_size(Pos2::new(rect.max.x - size * 0.36, rect.center().y), Vec2::splat(size));
-        paint_cover(&painter, backdrop, CornerRadius::ZERO, cx.logo, Color32::from_gray(210));
+        let emblem = cx.logo.texture(ui.ctx(), LogoVariant::Emblem, size);
+        paint_cover(&painter, backdrop, CornerRadius::ZERO, &emblem, Color32::from_white_alpha(195));
         let left = Rect::from_min_max(backdrop.min, Pos2::new(backdrop.center().x, backdrop.max.y));
         Theme::paint_horizontal_gradient(&painter, left, Theme::BG, Theme::BG.gamma_multiply(0.0));
-        let top = Rect::from_min_max(backdrop.min, Pos2::new(backdrop.max.x, backdrop.min.y + size * 0.3));
-        Theme::paint_vertical_gradient(&painter, top, Theme::BG, Theme::BG.gamma_multiply(0.0));
-        let bottom = Rect::from_min_max(Pos2::new(backdrop.min.x, backdrop.max.y - size * 0.3), backdrop.max);
-        Theme::paint_vertical_gradient(&painter, bottom, Theme::BG.gamma_multiply(0.0), Theme::BG);
     }
 
     let content_w = (width - pad * 2.0).min(560.0);

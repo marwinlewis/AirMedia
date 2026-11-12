@@ -1,8 +1,13 @@
-use image::imageops::FilterType;
+use airmedia::ui::logo::{render_unmultiplied_rgba, LogoVariant};
 use image::{Rgba, RgbaImage};
 use std::fs;
 use std::io::Cursor;
 use std::path::PathBuf;
+
+fn render_svg(variant: LogoVariant, size: u32) -> RgbaImage {
+    let rgba = render_unmultiplied_rgba(variant, size);
+    RgbaImage::from_raw(size, size, rgba).expect("valid RGBA dimensions")
+}
 
 fn encode_png(img: &RgbaImage) -> Vec<u8> {
     let mut buf = Cursor::new(Vec::new());
@@ -38,13 +43,13 @@ fn create_circle_icon(img: &RgbaImage) -> RgbaImage {
     round
 }
 
-fn create_adaptive_foreground(src: &RgbaImage, target_size: u32) -> RgbaImage {
+fn create_adaptive_foreground(target_size: u32) -> RgbaImage {
     let mut canvas = RgbaImage::new(target_size, target_size);
     // Safe zone is inner 66% (e.g. 72dp out of 108dp)
     let icon_size = ((target_size as f32) * 0.72).round() as u32;
-    let scaled = image::imageops::resize(src, icon_size, icon_size, FilterType::Lanczos3);
+    let emblem = render_svg(LogoVariant::Emblem, icon_size);
     let offset = (target_size - icon_size) / 2;
-    image::imageops::overlay(&mut canvas, &scaled, offset as i64, offset as i64);
+    image::imageops::overlay(&mut canvas, &emblem, offset as i64, offset as i64);
     canvas
 }
 
@@ -104,30 +109,13 @@ fn generate_icns(png_frames: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
 
 fn main() {
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        project_root.join("dist").join("airmedia.png"),
-        project_root.join("assets").join("icon.png"),
-        project_root.join("assets").join("linux").join("airmedia.png"),
-    ];
-
-    let source_icon_path = candidates
-        .into_iter()
-        .find(|p| p.exists())
-        .expect("No source icon found in assets/icon.png or dist/airmedia.png");
-
-    println!("Loading source icon from: {}", source_icon_path.display());
-    let source_img = image::open(&source_icon_path)
-        .expect("Failed to open source icon")
-        .to_rgba8();
-
-    let (src_w, src_h) = source_img.dimensions();
-    println!("Source icon dimensions: {}x{}", src_w, src_h);
+    println!("Rasterizing multi-platform assets from dist/airmedia.svg...");
 
     // 1. Primary App Icons
     let assets_dir = project_root.join("assets");
     fs::create_dir_all(&assets_dir).unwrap();
 
-    let icon_512 = image::imageops::resize(&source_img, 512, 512, FilterType::Lanczos3);
+    let icon_512 = render_svg(LogoVariant::Badge, 512);
     let icon_512_png = encode_png(&icon_512);
     let app_icon_path = assets_dir.join("icon.png");
     fs::write(&app_icon_path, &icon_512_png).unwrap();
@@ -140,8 +128,8 @@ fn main() {
     let ico_sizes = [16u32, 24, 32, 48, 64, 128, 256];
     let mut ico_frames = Vec::new();
     for size in ico_sizes {
-        let resized = image::imageops::resize(&source_img, size, size, FilterType::Lanczos3);
-        ico_frames.push((size, encode_png(&resized)));
+        let rendered = render_svg(LogoVariant::Badge, size);
+        ico_frames.push((size, encode_png(&rendered)));
     }
     let ico_bytes = generate_ico(&ico_frames);
     let ico_path = win_dir.join("icon.ico");
@@ -163,12 +151,8 @@ fn main() {
     ];
     let mut icns_frames = Vec::new();
     for (ostype, size) in icns_specs {
-        let resized = if *size == src_w && *size == src_h {
-            source_img.clone()
-        } else {
-            image::imageops::resize(&source_img, *size, *size, FilterType::Lanczos3)
-        };
-        icns_frames.push((*ostype, encode_png(&resized)));
+        let rendered = render_svg(LogoVariant::Badge, *size);
+        icns_frames.push((*ostype, encode_png(&rendered)));
     }
     let icns_bytes = generate_icns(&icns_frames);
     let icns_path = macos_dir.join("AppIcon.icns");
@@ -179,7 +163,7 @@ fn main() {
     let linux_dir = assets_dir.join("linux");
     fs::create_dir_all(&linux_dir).unwrap();
 
-    let linux_png = image::imageops::resize(&source_img, 256, 256, FilterType::Lanczos3);
+    let linux_png = render_svg(LogoVariant::Badge, 256);
     let linux_png_path = linux_dir.join("airmedia.png");
     fs::write(&linux_png_path, encode_png(&linux_png)).unwrap();
     println!("Generated: {}", linux_png_path.display());
@@ -192,9 +176,9 @@ fn main() {
             .join(format!("{}x{}", size, size))
             .join("apps");
         fs::create_dir_all(&size_dir).unwrap();
-        let resized = image::imageops::resize(&source_img, size, size, FilterType::Lanczos3);
+        let rendered = render_svg(LogoVariant::Badge, size);
         let out_file = size_dir.join("airmedia.png");
-        fs::write(&out_file, encode_png(&resized)).unwrap();
+        fs::write(&out_file, encode_png(&rendered)).unwrap();
     }
     println!("Generated Linux hicolor icon hierarchy (16 to 512)");
 
@@ -216,22 +200,21 @@ fn main() {
         fs::create_dir_all(&target_dir).unwrap();
 
         // 1. Standard square/adaptive icon
-        let launcher_img = image::imageops::resize(&source_img, launcher_size, launcher_size, FilterType::Lanczos3);
+        let launcher_img = render_svg(LogoVariant::Badge, launcher_size);
         fs::write(target_dir.join("ic_launcher.png"), encode_png(&launcher_img)).unwrap();
 
         // 2. Round icon
         let round_img = create_circle_icon(&launcher_img);
         fs::write(target_dir.join("ic_launcher_round.png"), encode_png(&round_img)).unwrap();
 
-        // 3. Adaptive foreground
-        let fg_img = create_adaptive_foreground(&source_img, fg_size);
+        // 3. Adaptive foreground (transparent emblem only)
+        let fg_img = create_adaptive_foreground(fg_size);
         fs::write(target_dir.join("ic_launcher_foreground.png"), encode_png(&fg_img)).unwrap();
     }
 
     // Google Play Store icon (512x512)
-    let play_store_icon = image::imageops::resize(&source_img, 512, 512, FilterType::Lanczos3);
     let play_store_path = android_assets_dir.join("playstore-icon.png");
-    fs::write(&play_store_path, encode_png(&play_store_icon)).unwrap();
+    fs::write(&play_store_path, &icon_512_png).unwrap();
     println!("Generated Android assets: mipmaps (mdpi to xxxhdpi) + playstore-icon.png");
 
     // Also mirror to android/ project if it exists
@@ -259,5 +242,5 @@ fn main() {
         println!("Mirrored icon to dist/airmedia-windows-x64/icon.png");
     }
 
-    println!("\nAll assets successfully generated from dist/airmedia.png!");
+    println!("\nAll assets successfully generated from dist/airmedia.svg!");
 }

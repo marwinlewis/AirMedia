@@ -6,13 +6,14 @@ use crate::persistence::SessionState;
 use crate::playlist::{Playlist, RepeatMode};
 use crate::ui::about_dialog::AboutDialog;
 use crate::ui::artwork::ArtworkCache;
-use crate::ui::browse::{self, BrowseAction, BrowseCx, BrowseState};
+use crate::ui::browse::{self, BrowseAction, BrowseCx, BrowseState, NAV_HEIGHT};
 use crate::ui::codec_dialog::{CodecDialog, CodecDialogState};
 use crate::ui::canvas::{AspectRatioMode, AudioStage, VideoCanvas};
 use crate::ui::controls::{ControlsCtx, ControlsView, BOTTOM_CONTROLS_H};
 use crate::ui::equalizer_dialog::EqualizerDialog;
 use crate::ui::info_dialog::InfoDialog;
 use crate::ui::jump_dialog::JumpDialog;
+use crate::ui::logo::LogoCache;
 
 use crate::ui::menu_bar::{media_dialog, MenuBarView, MenuCtx, OpenRequest};
 use crate::ui::mini_player::{self, MiniPlayerCx, MINI_PLAYER_HEIGHT};
@@ -21,6 +22,7 @@ use crate::ui::preferences_dialog::{PreferencesDialog, PreferencesState};
 use crate::ui::shortcuts_dialog::ShortcutsDialog;
 use crate::ui::stream_dialog::StreamDialog;
 use crate::ui::theme::Theme;
+use crate::ui::window_chrome;
 
 use eframe::egui::{self, Align2, Key, Popup, PopupCloseBehavior, Pos2, Rect, Response, Sense, Stroke, Ui, UiBuilder, Vec2};
 use std::collections::HashMap;
@@ -76,7 +78,7 @@ pub struct AirMediaApp {
     last_session_json: String,
     /// Window level last sent to the OS, so the command is only sent on change.
     applied_always_on_top: Option<bool>,
-    logo_texture: Option<egui::TextureHandle>,
+    logo_cache: LogoCache,
     artwork: ArtworkCache,
     library: Library,
     library_signature: Option<u64>,
@@ -145,7 +147,7 @@ impl AirMediaApp {
             last_session_save: Instant::now(),
             last_session_json,
             applied_always_on_top: None,
-            logo_texture: None,
+            logo_cache: LogoCache::default(),
             artwork: ArtworkCache::default(),
             library: Library::default(),
             library_signature: None,
@@ -833,7 +835,7 @@ impl AirMediaApp {
     }
 
     /// The library, with the now-playing bar docked under it when something is loaded.
-    fn browse_screen(&mut self, ui: &mut Ui, ctx: &egui::Context, rect: Rect, logo: &egui::TextureHandle, levels: [f32; 16]) {
+    fn browse_screen(&mut self, ui: &mut Ui, ctx: &egui::Context, rect: Rect, nav_rect: Rect, levels: [f32; 16]) {
         self.refresh_library();
 
         let labels = self.now_labels();
@@ -859,12 +861,13 @@ impl AirMediaApp {
             up_next: up_next.as_deref(),
             playlist_len: self.playlist.items.len(),
             playlist_open: self.show_playlist,
+            is_fullscreen: self.is_fullscreen,
             live_frame: self.canvas.texture.as_ref().filter(|_| is_video),
-            logo,
+            logo: &mut self.logo_cache,
             levels,
             actions: &mut self.actions,
         };
-        let menu = browse::show(ui, page_rect, &mut self.browse, &mut cx);
+        let menu = browse::show(ui, page_rect, nav_rect, &mut self.browse, &mut cx);
 
         // Details overlay, shown above everything on this screen.
         let mut details_closed = false;
@@ -909,7 +912,7 @@ impl AirMediaApp {
     }
 
     /// Edge-to-edge playback with controls that fade away.
-    fn player_screen(&mut self, ui: &mut Ui, ctx: &egui::Context, rect: Rect, subtitle: Option<&str>, levels: [f32; 16]) {
+    fn player_screen(&mut self, ui: &mut Ui, ctx: &egui::Context, rect: Rect, top_rect: Rect, subtitle: Option<&str>, levels: [f32; 16]) {
         let Some((title, sub_label)) = self.now_labels() else {
             self.view = View::Browse;
             return;
@@ -983,6 +986,7 @@ impl AirMediaApp {
         let output = self.controls.show(
             ui,
             rect,
+            top_rect,
             opacity,
             &mut self.player,
             ControlsCtx {
@@ -1053,22 +1057,6 @@ impl AirMediaApp {
 impl eframe::App for AirMediaApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        let logo_tex = self
-            .logo_texture
-            .get_or_insert_with(|| {
-                let icon_bytes = include_bytes!("../assets/icon.png");
-                let img = image::load_from_memory(icon_bytes)
-                    .expect("Embedded icon.png must be valid")
-                    .to_rgba8();
-                let (w, h) = img.dimensions();
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(
-                    [w as usize, h as usize],
-                    &img.into_raw(),
-                );
-                let options = egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR };
-                ctx.load_texture("app_logo", color_image, options)
-            })
-            .clone();
 
         self.artwork.begin_frame(&ctx);
         self.handle_shortcuts(&ctx);
@@ -1134,19 +1122,43 @@ impl eframe::App for AirMediaApp {
             self.window_title = window_title;
         }
 
+        window_chrome::handle_edge_resize(&ctx, self.is_fullscreen);
+
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Theme::BG))
             .show(ui, |ui| {
-                // The playlist drawer docks to the right of either screen.
-                PlaylistView::show(ui, &mut self.playlist, &mut self.player, &mut self.show_playlist);
+                let full_window_rect = ui.available_rect_before_wrap();
+                let top_inset = if window_chrome::CUSTOM_CHROME && !self.is_fullscreen {
+                    NAV_HEIGHT
+                } else {
+                    0.0
+                };
+                let drawer_rect = Rect::from_min_max(
+                    Pos2::new(
+                        full_window_rect.min.x,
+                        (full_window_rect.min.y + top_inset).min(full_window_rect.max.y),
+                    ),
+                    full_window_rect.max,
+                );
+                let mut drawer_host = ui.new_child(UiBuilder::new().id_salt("playlist_host").max_rect(drawer_rect));
+                // The playlist drawer docks to the right of either screen, below the custom top bar.
+                PlaylistView::show(&mut drawer_host, &mut self.playlist, &mut self.player, &mut self.show_playlist);
 
-                let full_rect = ui.available_rect_before_wrap();
-                let _ = ui.allocate_rect(full_rect, Sense::hover());
-                let mut screen = ui.new_child(UiBuilder::new().id_salt("screen").max_rect(full_rect));
-                screen.shrink_clip_rect(full_rect);
+                let remaining = drawer_host.available_rect_before_wrap();
+                let content_rect = Rect::from_min_max(
+                    Pos2::new(remaining.min.x, full_window_rect.min.y),
+                    Pos2::new(remaining.max.x, full_window_rect.max.y),
+                );
+                let nav_rect = Rect::from_min_size(
+                    full_window_rect.min,
+                    Vec2::new(full_window_rect.width(), NAV_HEIGHT),
+                );
+                let _ = ui.allocate_rect(full_window_rect, Sense::hover());
+                let mut screen = ui.new_child(UiBuilder::new().id_salt("screen").max_rect(full_window_rect));
+                screen.shrink_clip_rect(full_window_rect);
                 match self.view {
-                    View::Browse => self.browse_screen(&mut screen, &ctx, full_rect, &logo_tex, visualizer_levels),
-                    View::Player => self.player_screen(&mut screen, &ctx, full_rect, active_subtitle.as_deref(), visualizer_levels),
+                    View::Browse => self.browse_screen(&mut screen, &ctx, content_rect, nav_rect, visualizer_levels),
+                    View::Player => self.player_screen(&mut screen, &ctx, content_rect, nav_rect, active_subtitle.as_deref(), visualizer_levels),
                 }
 
                 // Toast HUD
@@ -1155,7 +1167,7 @@ impl eframe::App for AirMediaApp {
                     if elapsed < *duration {
                         let fade_start = duration - 0.4;
                         let alpha = (1.0 - (elapsed - fade_start).max(0.0) / 0.4).clamp(0.0, 1.0);
-                        let pos = Pos2::new(full_rect.center().x, full_rect.min.y + 84.0);
+                        let pos = Pos2::new(content_rect.center().x, full_window_rect.min.y + 84.0);
                         draw_toast_hud(ui, pos, msg, alpha);
                     } else {
                         self.toast = None;
@@ -1163,7 +1175,7 @@ impl eframe::App for AirMediaApp {
                 }
 
                 if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
-                    draw_drag_overlay(ui, full_rect);
+                    draw_drag_overlay(ui, full_window_rect);
                 }
             });
 
@@ -1180,7 +1192,7 @@ impl eframe::App for AirMediaApp {
             self.open_paths(vec![url], true);
         }
         PreferencesDialog::show(ui, &mut self.player, &mut self.preferences_state, &mut self.show_preferences);
-        AboutDialog::show(ui, &mut self.show_about, &logo_tex);
+        AboutDialog::show(ui, &mut self.show_about, &mut self.logo_cache);
         ShortcutsDialog::show(ui, &mut self.show_shortcuts);
         let duration = self.player.duration_secs;
         if let Some(t) = JumpDialog::show(ui, &mut self.jump_input, &mut self.show_jump, duration) {
@@ -1192,6 +1204,8 @@ impl eframe::App for AirMediaApp {
         if !self.actions.is_empty() {
             self.run_actions(&ctx);
         }
+
+        window_chrome::paint_window_border(&ctx, self.is_fullscreen);
 
         if self.last_session_save.elapsed() >= SESSION_SAVE_INTERVAL
             || ctx.input(|i| i.viewport().close_requested())

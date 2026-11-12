@@ -9,16 +9,14 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-fn load_app_icon() -> Option<egui::IconData> {
-    let icon_bytes = include_bytes!("../assets/icon.png");
-    let img = image::load_from_memory(icon_bytes).ok()?;
-    let rgba = img.to_rgba8();
-    let (width, height) = rgba.dimensions();
-    Some(egui::IconData {
-        rgba: rgba.into_raw(),
-        width,
-        height,
-    })
+fn load_app_icon() -> egui::IconData {
+    let size = 256u32;
+    let rgba = ui::logo::render_unmultiplied_rgba(ui::logo::LogoVariant::Badge, size);
+    egui::IconData {
+        rgba,
+        width: size,
+        height: size,
+    }
 }
 
 fn main() -> eframe::Result<()> {
@@ -32,16 +30,14 @@ fn main() -> eframe::Result<()> {
         .map(|p| if is_url(&p) { p } else { std::path::absolute(&p).unwrap_or(p) })
         .collect();
 
-    let mut viewport = egui::ViewportBuilder::default()
+    let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 780.0])
         .with_min_inner_size([480.0, 400.0])
         .with_title(APP_NAME)
+        .with_decorations(false)
         .with_active(true)
-        .with_drag_and_drop(true);
-
-    if let Some(icon) = load_app_icon() {
-        viewport = viewport.with_icon(Arc::new(icon));
-    }
+        .with_drag_and_drop(true)
+        .with_icon(Arc::new(load_app_icon()));
 
     let native_options = eframe::NativeOptions {
         viewport,

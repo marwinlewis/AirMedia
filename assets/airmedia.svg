@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#262449"/>
+      <stop offset="55%" stop-color="#1D1A3E"/>
+      <stop offset="100%" stop-color="#151231"/>
+    </linearGradient>
+
+    <radialGradient id="ambient-glow" cx="53%" cy="50%" r="48%">
+      <stop offset="0%" stop-color="#FF5B3A" stop-opacity="0.18"/>
+      <stop offset="45%" stop-color="#FF3D63" stop-opacity="0.06"/>
+      <stop offset="78%" stop-color="#FF3D63" stop-opacity="0.015"/>
+      <stop offset="100%" stop-color="#151231" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="play-grad" x1="0.1" y1="0.1" x2="0.95" y2="0.75">
+      <stop offset="0%" stop-color="#FF6B4A"/>
+      <stop offset="55%" stop-color="#FF8333"/>
+      <stop offset="100%" stop-color="#FFA52E"/>
+    </linearGradient>
+
+    <linearGradient id="play-highlight" x1="0.15" y1="0" x2="0.92" y2="0.9">
+      <stop offset="0%" stop-color="#FFD07A" stop-opacity="0.28"/>
+      <stop offset="60%" stop-color="#FFAA4C" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#FF8333" stop-opacity="0"/>
+    </linearGradient>
+
+    <clipPath id="play-body-clip">
+      <path d="M 197 190
+               L 197 154
+               Q 197 128 220 141
+               L 394 242
+               Q 416 255 394 268
+               L 328 306
+               C 305 268, 266 200, 197 190 Z"/>
+    </clipPath>
+
+    <linearGradient id="bottom-grad" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0%" stop-color="#FA3561"/>
+      <stop offset="65%" stop-color="#FF554D"/>
+      <stop offset="100%" stop-color="#FF783D"/>
+    </linearGradient>
+
+    <linearGradient id="wing-1-grad" x1="0" y1="0.2" x2="1" y2="0.85">
+      <stop offset="0%" stop-color="#FF515E"/>
+      <stop offset="45%" stop-color="#FF8242"/>
+      <stop offset="100%" stop-color="#FF9C38"/>
+    </linearGradient>
+
+    <linearGradient id="wing-2-grad" x1="0" y1="0.2" x2="1" y2="0.85">
+      <stop offset="0%" stop-color="#FA3E61"/>
+      <stop offset="48%" stop-color="#FF6E47"/>
+      <stop offset="100%" stop-color="#FF913C"/>
+    </linearGradient>
+
+    <linearGradient id="wing-3-grad" x1="0" y1="0.2" x2="1" y2="0.85">
+      <stop offset="0%" stop-color="#F73364"/>
+      <stop offset="52%" stop-color="#FF5D4E"/>
+      <stop offset="100%" stop-color="#FF8440"/>
+    </linearGradient>
+
+    <filter id="emblem-glow" x="-16%" y="-16%" width="132%" height="132%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="8" result="blur"/>
+      <feFlood flood-color="#FF5438" flood-opacity="0.32" result="glow-color"/>
+      <feComposite in="glow-color" in2="blur" operator="in" result="soft-glow"/>
+      <feMerge>
+        <feMergeNode in="soft-glow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <g id="background">
+    <rect width="512" height="512" fill="url(#bg-grad)"/>
+    <circle cx="272" cy="256" r="245" fill="url(#ambient-glow)"/>
+  </g>
+
+  <g id="emblem" filter="url(#emblem-glow)">
+    <!-- Upper-right main play triangle body -->
+    <path d="M 197 190
+             L 197 154
+             Q 197 128 220 141
+             L 394 242
+             Q 416 255 394 268
+             L 328 306
+             C 305 268, 266 200, 197 190 Z"
+          fill="url(#play-grad)"/>
+
+    <!-- Subtle glossy inner bevel along the upper-right slope and apex -->
+    <path d="M 197 128
+             L 418 255
+             L 345 304
+             C 340 272, 342 252, 368 250
+             L 204 146 Z"
+          fill="url(#play-highlight)"
+          clip-path="url(#play-body-clip)"/>
+
+    <!-- Top flame/wing ribbon -->
+    <path d="M 64 194
+             C 112 232, 162 204, 214 214
+             C 260 223, 294 262, 316 313
+             C 292 276, 258 242, 208 234
+             C 158 226, 110 250, 64 194 Z"
+          fill="url(#wing-1-grad)"/>
+
+    <!-- Middle flame/wing ribbon -->
+    <path d="M 80 240
+             C 124 274, 168 248, 214 256
+             C 254 263, 282 292, 298 323
+             C 276 298, 248 278, 208 273
+             C 162 267, 122 290, 80 240 Z"
+          fill="url(#wing-2-grad)"/>
+
+    <!-- Bottom flame/wing ribbon -->
+    <path d="M 108 282
+             C 146 312, 182 290, 218 297
+             C 248 303, 270 320, 280 334
+             C 262 321, 240 313, 212 311
+             C 172 308, 142 326, 108 282 Z"
+          fill="url(#wing-3-grad)"/>
+
+    <!-- Lower-left play triangle corner -->
+    <path d="M 197 325
+             C 222 325, 245 332, 264 343
+             L 220 368
+             Q 197 381 197 355 Z"
+          fill="url(#bottom-grad)"/>
+  </g>
+</svg>

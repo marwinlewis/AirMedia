@@ -1,4 +1,5 @@
 use super::dialog::show_dialog;
+use super::logo::{LogoCache, LogoVariant};
 use super::theme::Theme;
 use crate::app_info::{APP_COPYRIGHT, APP_DESCRIPTION, APP_NAME, APP_REPOSITORY, APP_VERSION};
 use eframe::egui::{self, RichText, Ui, Vec2};
@@ -6,10 +7,11 @@ use eframe::egui::{self, RichText, Ui, Vec2};
 pub struct AboutDialog;
 
 impl AboutDialog {
-    pub fn show(ui: &mut Ui, is_open: &mut bool, logo_tex: &egui::TextureHandle) {
+    pub fn show(ui: &mut Ui, is_open: &mut bool, logos: &mut LogoCache) {
         show_dialog(ui, "About", is_open, 380.0, |ui, _close| {
             ui.vertical_centered(|ui| {
-                let logo_widget = egui::Image::new(logo_tex)
+                let logo_tex = logos.texture(ui.ctx(), LogoVariant::Badge, 56.0);
+                let logo_widget = egui::Image::new(&logo_tex)
                     .fit_to_exact_size(Vec2::splat(56.0))
                     .corner_radius(egui::CornerRadius::same(16));
                 let resp = ui.add(logo_widget);

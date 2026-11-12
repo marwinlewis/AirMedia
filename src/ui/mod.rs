@@ -10,6 +10,7 @@ pub mod file_dialog;
 pub mod icons;
 pub mod info_dialog;
 pub mod jump_dialog;
+pub mod logo;
 pub mod menu_bar;
 pub mod mini_player;
 pub mod playlist_view;
@@ -17,5 +18,6 @@ pub mod preferences_dialog;
 pub mod shortcuts_dialog;
 pub mod stream_dialog;
 pub mod theme;
+pub mod window_chrome;
 
 pub use file_dialog::NativeFileDialog as FileDialog;
