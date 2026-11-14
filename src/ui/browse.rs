@@ -84,6 +84,8 @@ pub struct BrowseCx<'a> {
     pub logo: &'a mut LogoCache,
     pub levels: [f32; 16],
     pub actions: &'a mut Vec<BrowseAction>,
+    /// Private window: shows a badge and nothing watched is saved.
+    pub incognito: bool,
 }
 
 /// Paints the whole screen into `rect` and the top navigation bar across `nav_rect`; returns the
@@ -189,6 +191,17 @@ fn navigation(ui: &mut Ui, rect: Rect, state: &mut BrowseState, cx: &mut BrowseC
     if brand_resp.clicked() {
         state.tab = BrowseTab::Home;
         state.close_search();
+    }
+    if cx.incognito && !narrow {
+        x += 10.0;
+        let label = painter.layout_no_wrap("Incognito".to_owned(), Theme::font_semibold(11.5), Theme::TEXT);
+        let pill = Rect::from_min_size(Pos2::new(x, cy - 11.0), Vec2::new(label.size().x + 18.0, 22.0));
+        painter.rect_filled(pill, Theme::radius_full(), Theme::SURFACE_HI);
+        painter.rect_stroke(pill, Theme::radius_full(), egui::Stroke::new(1.0, Theme::BORDER), Theme::stroke_kind());
+        painter.galley(pill.center() - label.size() / 2.0, label, Theme::TEXT);
+        ui.interact(pill, Id::unique("browse_incognito"), Sense::hover())
+            .on_hover_text("Incognito window: what you watch here isn't saved to your history");
+        x = pill.max.x;
     }
     x += if narrow { 6.0 } else if compact { 8.0 } else { 26.0 };
 
@@ -473,8 +486,13 @@ fn welcome(ui: &mut Ui, view_h: f32, cx: &mut BrowseCx<'_>) {
     let mut job = LayoutJob::simple("Everything you want to watch, in one place.".to_owned(), Theme::font_bold(title_size), Theme::TEXT, content_w);
     job.wrap.max_width = content_w;
     let title = painter.layout_job(job);
+    let body_text = if cx.incognito {
+        "You're incognito. Nothing you play in this window is added to your history, resume positions or playlist, and it's all forgotten when you close it."
+    } else {
+        "Drop files anywhere in this window, or open a file, a whole folder or a network stream. AirMedia builds your library as you go."
+    };
     let body = painter.layout(
-        "Drop files anywhere in this window, or open a file, a whole folder or a network stream. AirMedia builds your library as you go.".to_owned(),
+        body_text.to_owned(),
         Theme::font(16.0),
         Theme::TEXT_MUTED,
         content_w,

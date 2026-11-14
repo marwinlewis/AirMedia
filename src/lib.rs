@@ -22,7 +22,7 @@ fn android_main(app: AndroidApp) {
         native_options,
         Box::new(|cc| {
             ui::theme::Theme::install(&cc.egui_ctx);
-            let app = app::AirMediaApp::new();
+            let app = app::AirMediaApp::new(false);
             Ok(Box::new(app))
         }),
     );

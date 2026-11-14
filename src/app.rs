@@ -31,6 +31,8 @@ use std::time::{Duration, Instant};
 
 /// How often session state (playlist, resume positions, ...) is flushed to disk.
 const SESSION_SAVE_INTERVAL: Duration = Duration::from_secs(10);
+/// Command-line flag that starts a private window.
+pub const INCOGNITO_FLAG: &str = "--incognito";
 /// A pipeline that "finishes" this quickly after starting failed to play rather than ended.
 const MIN_PLAYBACK_BEFORE_ADVANCE: Duration = Duration::from_millis(500);
 
@@ -65,6 +67,9 @@ pub struct AirMediaApp {
     pub preferences_state: PreferencesState,
     /// Recent files, playlist, equalizer and resume positions persisted across runs.
     pub session: SessionState,
+    /// Private window: starts with an empty library and never writes history (recent files,
+    /// resume positions, playlist, thumbnails) to disk. Settings still load and save.
+    pub incognito: bool,
     pub stream_url_input: String,
     pub is_fullscreen: bool,
     pub last_mouse_activity: Instant,
@@ -95,11 +100,11 @@ pub struct AirMediaApp {
 }
 
 impl AirMediaApp {
-    pub fn new() -> Self {
+    pub fn new(incognito: bool) -> Self {
         let codec_state = CodecDialogState::default();
         let show_codecs = !codec_state.status.is_ready();
         let preferences_state = PreferencesState::load();
-        let session = SessionState::load();
+        let session = if incognito { incognito_session(SessionState::load()) } else { SessionState::load() };
 
         let mut player = MediaPlayer::new();
         player.hw_accel = preferences_state.hw_accel;
@@ -137,6 +142,7 @@ impl AirMediaApp {
             codec_state,
             preferences_state,
             session,
+            incognito,
             stream_url_input: String::new(),
             is_fullscreen: false,
             last_mouse_activity: Instant::now(),
@@ -148,7 +154,7 @@ impl AirMediaApp {
             last_session_json,
             applied_always_on_top: None,
             logo_cache: LogoCache::default(),
-            artwork: ArtworkCache::default(),
+            artwork: ArtworkCache::new(incognito),
             library: Library::default(),
             library_signature: None,
             known_paths: HashMap::new(),
@@ -275,12 +281,41 @@ impl AirMediaApp {
     /// Writes the session file if anything changed since the last write.
     pub fn save_session(&mut self) {
         self.sync_session();
+        self.last_session_save = Instant::now();
+        if self.incognito {
+            // History of a private window lives only in memory.
+            return;
+        }
         let json = self.session.to_json();
         if json != self.last_session_json {
             SessionState::save_json(&json);
             self.last_session_json = json;
         }
-        self.last_session_save = Instant::now();
+    }
+
+    /// Opens a private window: a second AirMedia process started with `--incognito`. On
+    /// Android, where there is only one window, this window turns private for the rest of the run.
+    pub fn open_incognito(&mut self) {
+        if self.incognito {
+            return;
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let spawned = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg(INCOGNITO_FLAG).spawn());
+            if let Err(e) = spawned {
+                self.set_error_toast(format!("Couldn't open an incognito window: {e}"));
+            }
+        }
+        #[cfg(target_os = "android")]
+        {
+            // Save what was there so far, then stop recording.
+            self.save_session();
+            self.incognito = true;
+            self.session = incognito_session(std::mem::take(&mut self.session));
+            self.artwork = ArtworkCache::new(true);
+            self.library_signature = None;
+            self.set_toast("Incognito: nothing you watch from now on is saved");
+        }
     }
 
     /// Moves on when the current item has played to the end.
@@ -687,8 +722,10 @@ impl AirMediaApp {
             self.show_equalizer = !self.show_equalizer;
         }
 
-        // Ctrl+N: Open Network Stream
-        if input.modifiers.ctrl && input.key_pressed(Key::N) {
+        // Ctrl+Shift+N: New incognito window; Ctrl+N: Open Network Stream
+        if input.modifiers.ctrl && input.modifiers.shift && input.key_pressed(Key::N) {
+            self.open_incognito();
+        } else if input.modifiers.ctrl && input.key_pressed(Key::N) {
             self.show_stream = true;
         }
 
@@ -785,6 +822,7 @@ impl AirMediaApp {
         let mut open_request: Option<OpenRequest> = None;
         let mut open_jump = false;
         let mut stop_request = false;
+        let mut open_incognito = false;
         let mut always_on_top = self.preferences_state.always_on_top;
         Popup::menu(button)
             .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
@@ -813,6 +851,8 @@ impl AirMediaApp {
                         toggle_fullscreen: &mut toggle_fs,
                         toast_msg: &mut toast,
                         prefs: &self.preferences_state,
+                        incognito: self.incognito,
+                        open_incognito: &mut open_incognito,
                     },
                 );
             });
@@ -831,6 +871,9 @@ impl AirMediaApp {
         }
         if stop_request {
             self.close_media();
+        }
+        if open_incognito {
+            self.open_incognito();
         }
     }
 
@@ -866,6 +909,7 @@ impl AirMediaApp {
             logo: &mut self.logo_cache,
             levels,
             actions: &mut self.actions,
+            incognito: self.incognito,
         };
         let menu = browse::show(ui, page_rect, nav_rect, &mut self.browse, &mut cx);
 
@@ -1113,9 +1157,10 @@ impl eframe::App for AirMediaApp {
             self.applied_always_on_top = Some(on_top);
         }
 
+        let app_name = if self.incognito { "AirMedia (Incognito)" } else { "AirMedia" };
         let window_title = match self.now_labels() {
-            Some((title, _)) => format!("{title} \u{2014} AirMedia"),
-            None => "AirMedia".to_string(),
+            Some((title, _)) => format!("{title} \u{2014} {app_name}"),
+            None => app_name.to_string(),
         };
         if window_title != self.window_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title.clone()));
@@ -1233,6 +1278,11 @@ impl Drop for AirMediaApp {
     fn drop(&mut self) {
         self.save_session();
     }
+}
+
+/// What a private session starts with: no history or playlist, only the effect settings.
+fn incognito_session(saved: SessionState) -> SessionState {
+    SessionState { equalizer: saved.equalizer, ..Default::default() }
 }
 
 fn format_clock(secs: f64) -> String {

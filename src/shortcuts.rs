@@ -69,6 +69,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     sc("Drag", "Reorder playlist items", Group::Playlist),
     hint("O", "Open media file", Group::Window, "open"),
     sc("Ctrl + N", "Open network stream", Group::Window),
+    sc("Ctrl + Shift + N", "New incognito window (nothing watched there is saved)", Group::Window),
     sc("Ctrl + F", "Search the library", Group::Window),
     hint("F or F11", "Toggle fullscreen", Group::Window, "fullscreen"),
     sc("Double click", "Toggle fullscreen", Group::Window),

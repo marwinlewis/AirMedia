@@ -20,6 +20,9 @@ fn load_app_icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result<()> {
+    // `--incognito`: a private window that records no history (see `AirMediaApp::incognito`).
+    let incognito = env::args_os().skip(1).any(|a| a == airmedia::app::INCOGNITO_FLAG);
+
     // Every argument is a file, folder, playlist or stream URL ("Open with" can pass many).
     // Flag-like arguments (e.g. macOS's -psn_*) are ignored.
     let cli_inputs: Vec<PathBuf> = env::args_os()
@@ -33,7 +36,7 @@ fn main() -> eframe::Result<()> {
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 780.0])
         .with_min_inner_size([480.0, 400.0])
-        .with_title(APP_NAME)
+        .with_title(if incognito { format!("{APP_NAME} (Incognito)") } else { APP_NAME.to_string() })
         .with_decorations(false)
         .with_active(true)
         .with_drag_and_drop(true)
@@ -50,7 +53,7 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| {
             ui::theme::Theme::install(&cc.egui_ctx);
 
-            let mut app = AirMediaApp::new();
+            let mut app = AirMediaApp::new(incognito);
             app.open_paths(cli_inputs, true);
 
             Ok(Box::new(app))

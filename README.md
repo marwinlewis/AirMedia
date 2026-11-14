@@ -111,6 +111,7 @@ AirMedia is built around two screens: a library to browse and a player that gets
 | `Drag` | Reorder playlist items |
 | `O` | Open media file |
 | `Ctrl + N` | Open network stream |
+| `Ctrl + Shift + N` | New incognito window (nothing watched there is saved) |
 | `Ctrl + F` | Search the library |
 | `F` or `F11` | Toggle fullscreen |
 | `Double click` | Toggle fullscreen |

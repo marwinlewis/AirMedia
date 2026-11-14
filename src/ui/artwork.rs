@@ -115,6 +115,11 @@ pub struct ArtworkCache {
     requested: HashSet<PathBuf>,
     palette: Vec<TextureHandle>,
     scrim: Option<TextureHandle>,
+    /// Private window: thumbnails go to a throwaway folder that is deleted on exit, so the
+    /// shared cache never learns what was opened.
+    incognito: bool,
+    /// The throwaway folder, once created.
+    private_dir: Option<PathBuf>,
 }
 
 impl Default for ArtworkCache {
@@ -131,6 +136,8 @@ impl Default for ArtworkCache {
             requested: HashSet::new(),
             palette: Vec::new(),
             scrim: None,
+            incognito: false,
+            private_dir: None,
         }
     }
 }
@@ -139,10 +146,26 @@ impl Drop for ArtworkCache {
     fn drop(&mut self) {
         self.queue.shutdown.store(true, Ordering::SeqCst);
         self.queue.wake.notify_all();
+        if let Some(dir) = &self.private_dir {
+            // Workers may still be finishing a write; a leftover file is removed on the next try.
+            for _ in 0..5 {
+                if std::fs::remove_dir_all(dir).is_ok() || !dir.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
     }
 }
 
 impl ArtworkCache {
+    /// `incognito` keeps generated thumbnails out of the shared on-disk cache.
+    pub fn new(incognito: bool) -> Self {
+        let mut cache = Self::default();
+        cache.incognito = incognito;
+        cache
+    }
+
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         if !self.started {
             self.started = true;
@@ -182,15 +205,25 @@ impl ArtworkCache {
         self.palette = (0..PALETTE_SIZE).map(|i| ctx.load_texture(format!("art_palette_{i}"), palette_image(i), TextureOptions::LINEAR)).collect();
         self.scrim = Some(ctx.load_texture("art_scrim", scrim_image(), TextureOptions::LINEAR));
 
-        let Some(dir) = crate::persistence::config_dir().map(|d| d.join("thumbnails")) else { return };
+        let dir = if self.incognito {
+            Some(std::env::temp_dir().join(format!("airmedia-incognito-{}", std::process::id())))
+        } else {
+            crate::persistence::config_dir().map(|d| d.join("thumbnails"))
+        };
+        let Some(dir) = dir else { return };
         if std::fs::create_dir_all(&dir).is_err() {
             return;
+        }
+        if self.incognito {
+            self.private_dir = Some(dir.clone());
         }
         for _ in 0..WORKER_THREADS {
             let (queue, tx, ctx, dir) = (Arc::clone(&self.queue), self.tx.clone(), ctx.clone(), dir.clone());
             std::thread::spawn(move || worker(queue, tx, ctx, dir));
         }
-        std::thread::spawn(move || trim_cache(&dir));
+        if !self.incognito {
+            std::thread::spawn(move || trim_cache(&dir));
+        }
     }
 
     fn request(&mut self, path: &Path) {

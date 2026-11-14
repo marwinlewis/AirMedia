@@ -45,6 +45,9 @@ pub struct MenuCtx<'a> {
     pub toggle_fullscreen: &'a mut bool,
     pub toast_msg: &'a mut Option<String>,
     pub prefs: &'a PreferencesState,
+    /// This window is private; its recent list is not saved.
+    pub incognito: bool,
+    pub open_incognito: &'a mut bool,
 }
 
 /// File picker for media, also accepting playlists.
@@ -92,6 +95,11 @@ impl MenuBarView {
 
         if item(ui, "Open network stream…", "Ctrl+N").clicked() {
             *cx.show_stream = true;
+            ui.close();
+        }
+
+        if !cx.incognito && item(ui, "New incognito window", "Ctrl+Shift+N").clicked() {
+            *cx.open_incognito = true;
             ui.close();
         }
 
