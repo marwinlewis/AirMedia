@@ -72,7 +72,7 @@ build_app_bundle() {
 
     # Copy Info.plist and update version
     if [ -f "${PROJECT_ROOT}/assets/macos/Info.plist" ]; then
-        sed "s/0.1.0/${VERSION}/g" "${PROJECT_ROOT}/assets/macos/Info.plist" > "${CONTENTS_DIR}/Info.plist"
+        sed -E "s/<string>[0-9]+\.[0-9]+\.[0-9]+[^<]*<\/string>/<string>${VERSION}<\/string>/g" "${PROJECT_ROOT}/assets/macos/Info.plist" > "${CONTENTS_DIR}/Info.plist"
     fi
 
     # PkgInfo

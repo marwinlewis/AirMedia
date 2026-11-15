@@ -260,6 +260,17 @@ For detailed false-positive reporting guidelines and submission steps to Microso
 
 AirMedia includes a fully automated GitHub Actions workflow (`.github/workflows/release.yml`) that compiles, tests, packages, and signs all releases across Windows, Linux, macOS, and Android.
 
+### Bumping Version Across All Platforms
+
+AirMedia includes an automated cross-platform version bump tool ([`bump_version.ps1`](bump_version.ps1) / [`scripts/bump_version.sh`](scripts/bump_version.sh)) that synchronizes `Cargo.toml`, `Cargo.lock`, Android `versionCode`/`versionName`, Windows manifests, Inno Setup definitions, and macOS `Info.plist`:
+
+```powershell
+# Bump semver (patch / minor / major) or specify an explicit version
+.\bump_version.ps1 patch
+.\bump_version.ps1 minor -Commit -Tag
+.\bump_version.ps1 0.2.0 -DryRun
+```
+
 ### Triggering a Production Release
 
 1. **Push a Version Tag**:
