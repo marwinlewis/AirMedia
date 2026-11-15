@@ -17,7 +17,8 @@ VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
 echo "==> Building AirMedia v${VERSION} for Android..."
 
 # 2. Synchronize High-Resolution Assets
-echo "[1/5] Synchronizing multi-resolution icons from dist/airmedia.png..."
+echo "[1/5] Synchronizing multi-resolution icons..."
+mkdir -p "${PROJECT_ROOT}/dist"
 cargo run --example generate_assets
 
 # 3. Ensure cargo-ndk and Rust Android Targets

@@ -109,7 +109,7 @@ fn generate_icns(png_frames: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
 
 fn main() {
     let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    println!("Rasterizing multi-platform assets from dist/airmedia.svg...");
+    println!("Rasterizing multi-platform assets from assets/airmedia.svg...");
 
     // 1. Primary App Icons
     let assets_dir = project_root.join("assets");
@@ -242,11 +242,19 @@ fn main() {
         println!("Mirrored icon to dist/airmedia-windows-x64/icon.png");
     }
 
-    // 6. Master distribution PNG (2048x2048 transparent)
+    // 6. Master distribution assets (dist/airmedia.png, dist/airmedia.svg)
+    let dist_dir = project_root.join("dist");
+    fs::create_dir_all(&dist_dir).unwrap();
+
     let dist_png = render_svg(LogoVariant::Emblem, 2048);
-    let dist_png_path = project_root.join("dist").join("airmedia.png");
+    let dist_png_path = dist_dir.join("airmedia.png");
     fs::write(&dist_png_path, encode_png(&dist_png)).unwrap();
     println!("Generated: {}", dist_png_path.display());
 
-    println!("\nAll assets successfully generated from dist/airmedia.svg!");
+    let master_svg_path = project_root.join("assets").join("airmedia.svg");
+    if master_svg_path.exists() {
+        let _ = fs::copy(&master_svg_path, dist_dir.join("airmedia.svg"));
+    }
+
+    println!("\nAll assets successfully generated from assets/airmedia.svg!");
 }

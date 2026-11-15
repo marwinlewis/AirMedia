@@ -5,7 +5,6 @@ edition = "2021"
 description = "Ultra-lightweight modern GPU-accelerated media player written in Rust"
 authors = ["AirMedia Open Source Media Player <https://github.com/marwinlewis/airmedia>"]
 repository = "https://github.com/marwinlewis/airmedia"
-homepage = "https://github.com/marwinlewis/airmedia"
 license = "MIT"
 
 [lib]

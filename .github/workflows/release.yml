@@ -1,22 +1,6 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
-    branches:
-      - master
-    paths-ignore:
-      - '**.md'
-      - '.gitignore'
-      - '.gitattributes'
-  pull_request:
-    branches:
-      - master
-    paths-ignore:
-      - '**.md'
-      - '.gitignore'
-      - '.gitattributes'
   workflow_dispatch:
     inputs:
       publish_release:
@@ -24,7 +8,7 @@ on:
         type: boolean
         default: true
       tag_name:
-        description: 'Release tag (e.g. v0.1.0). If blank, uses pushed tag or Cargo.toml version.'
+        description: 'Release tag (e.g. v0.1.0). If blank, uses Cargo.toml version.'
         required: false
         type: string
         default: ''
@@ -37,7 +21,7 @@ on:
         type: boolean
         default: false
 
-# Build jobs (including pull_request runs) only need to read the repo; the release job
+# Build jobs only need to read the repo; the release job
 # below is the only one granted write access.
 permissions:
   contents: read
@@ -222,7 +206,7 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [build, build-android]
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/master' && github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+    if: inputs.publish_release
     runs-on: ubuntu-latest
     permissions:
       contents: write

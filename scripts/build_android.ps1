@@ -19,7 +19,8 @@ if ($CargoToml -match 'version\s*=\s*"([^"]+)"') {
 Write-Host "==> Building AirMedia v$Version for Android..." -ForegroundColor Cyan
 
 # 2. Synchronize High-Resolution Assets
-Write-Host "[1/5] Synchronizing multi-resolution icons from dist/airmedia.png..." -ForegroundColor Yellow
+Write-Host "[1/5] Synchronizing multi-resolution icons..." -ForegroundColor Yellow
+New-Item -ItemType Directory -Path (Join-Path $ProjectRoot "dist") -Force | Out-Null
 cargo run --example generate_assets
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Asset generation failed" -ForegroundColor Red
