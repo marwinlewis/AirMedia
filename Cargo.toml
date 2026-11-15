@@ -1,6 +1,6 @@
 [package]
 name = "airmedia"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Ultra-lightweight modern GPU-accelerated media player written in Rust"
 authors = ["AirMedia Open Source Media Player <https://github.com/marwinlewis/airmedia>"]
