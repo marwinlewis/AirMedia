@@ -10,9 +10,9 @@ pub const MASTER_SVG: &str = include_str!("../../assets/airmedia.svg");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LogoVariant {
-    /// Full dark-navy badge + glowing emblem (app icon, nav bar, about dialog).
+    /// App icon and branding mark (transparent background).
     Badge,
-    /// Transparent-background emblem only (welcome backdrop, adaptive icon foreground).
+    /// Transparent-background glowing emblem (welcome backdrop, adaptive icon foreground).
     Emblem,
 }
 
@@ -103,15 +103,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn badge_and_emblem_render_cleanly_at_any_size() {
-        let badge_16 = render_unmultiplied_rgba(LogoVariant::Badge, 16);
-        assert_eq!(badge_16.len(), 16 * 16 * 4);
-        assert_eq!(badge_16[3], 255, "badge corner should have opaque navy background");
+    fn logo_renders_transparent_and_cleanly() {
+        let emblem = render_unmultiplied_rgba(LogoVariant::Emblem, 512);
+        assert_eq!(emblem.len(), 512 * 512 * 4);
+        // Corners must be fully transparent
+        assert_eq!(emblem[3], 0, "top-left corner must be transparent");
+        assert_eq!(emblem[(511) * 4 + 3], 0, "top-right corner must be transparent");
+        assert_eq!(emblem[(511 * 512) * 4 + 3], 0, "bottom-left corner must be transparent");
+        assert_eq!(emblem[(511 * 512 + 511) * 4 + 3], 0, "bottom-right corner must be transparent");
 
-        let emblem_128 = render_unmultiplied_rgba(LogoVariant::Emblem, 128);
-        assert_eq!(emblem_128.len(), 128 * 128 * 4);
-        assert_eq!(emblem_128[3], 0, "emblem corner should be transparent");
-        let center = (64 * 128 + 70) * 4;
-        assert!(emblem_128[center + 3] > 200, "emblem center should be opaque");
+        // Foreground logo must be substantial and opaque
+        let opaque_count = emblem.chunks_exact(4).filter(|p| p[3] > 200).count();
+        assert!(opaque_count > 20_000, "emblem must have substantial opaque content, found {opaque_count}");
     }
 }

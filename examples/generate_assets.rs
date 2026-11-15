@@ -242,5 +242,11 @@ fn main() {
         println!("Mirrored icon to dist/airmedia-windows-x64/icon.png");
     }
 
+    // 6. Master distribution PNG (2048x2048 transparent)
+    let dist_png = render_svg(LogoVariant::Emblem, 2048);
+    let dist_png_path = project_root.join("dist").join("airmedia.png");
+    fs::write(&dist_png_path, encode_png(&dist_png)).unwrap();
+    println!("Generated: {}", dist_png_path.display());
+
     println!("\nAll assets successfully generated from dist/airmedia.svg!");
 }

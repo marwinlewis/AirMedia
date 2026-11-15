@@ -10,17 +10,10 @@ impl AboutDialog {
     pub fn show(ui: &mut Ui, is_open: &mut bool, logos: &mut LogoCache) {
         show_dialog(ui, "About", is_open, 380.0, |ui, _close| {
             ui.vertical_centered(|ui| {
-                let logo_tex = logos.texture(ui.ctx(), LogoVariant::Badge, 56.0);
+                let logo_tex = logos.texture(ui.ctx(), LogoVariant::Emblem, 64.0);
                 let logo_widget = egui::Image::new(&logo_tex)
-                    .fit_to_exact_size(Vec2::splat(56.0))
-                    .corner_radius(egui::CornerRadius::same(16));
-                let resp = ui.add(logo_widget);
-                ui.painter().rect_stroke(
-                    resp.rect,
-                    egui::CornerRadius::same(16),
-                    egui::Stroke::new(1.0, Theme::white(25)),
-                    Theme::stroke_kind(),
-                );
+                    .fit_to_exact_size(Vec2::splat(64.0));
+                ui.add(logo_widget);
 
                 ui.add_space(12.0);
                 ui.label(RichText::new(APP_NAME).font(Theme::font_semibold(22.0)).color(Theme::TEXT));

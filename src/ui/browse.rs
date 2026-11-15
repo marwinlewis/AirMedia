@@ -171,13 +171,11 @@ fn navigation(ui: &mut Ui, rect: Rect, state: &mut BrowseState, cx: &mut BrowseC
     let cy = nav.center().y;
 
     // Brand
-    let logo_size = if narrow { 32.0 } else { 36.0 };
+    let logo_size = if narrow { 34.0 } else { 38.0 };
     let logo_rect = Rect::from_center_size(Pos2::new(nav.min.x + pad + logo_size * 0.5, cy), Vec2::splat(logo_size));
-    let logo_tex = cx.logo.texture(ui.ctx(), LogoVariant::Badge, logo_size);
+    let logo_tex = cx.logo.texture(ui.ctx(), LogoVariant::Emblem, logo_size);
     let tex = egui::load::SizedTexture::from_handle(&logo_tex);
-    egui::Image::new(tex)
-        .corner_radius(CornerRadius::same(8))
-        .paint_at(ui, logo_rect);
+    egui::Image::new(tex).paint_at(ui, logo_rect);
     let mut x = logo_rect.max.x + if narrow { 6.0 } else { 10.0 };
     if !compact {
         let wordmark = painter.layout_no_wrap("AirMedia".to_owned(), Theme::font_bold(21.0), Theme::TEXT);
