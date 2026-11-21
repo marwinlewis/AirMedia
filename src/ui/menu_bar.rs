@@ -48,6 +48,7 @@ pub struct MenuCtx<'a> {
     /// This window is private; its recent list is not saved.
     pub incognito: bool,
     pub open_incognito: &'a mut bool,
+    pub take_screenshot: &'a mut bool,
 }
 
 /// File picker for media, also accepting playlists.
@@ -306,10 +307,7 @@ impl MenuBarView {
                 }
             });
             if item(ui, "Take screenshot", "Shift+S").clicked() {
-                match player.take_screenshot(&cx.prefs.screenshot_dir, cx.prefs.screenshot_format) {
-                    Ok(p) => *cx.toast_msg = Some(format!("Screenshot saved: {}", p.display())),
-                    Err(e) => *cx.toast_msg = Some(format!("Screenshot failed: {e}")),
-                }
+                *cx.take_screenshot = true;
                 ui.close();
             }
             if item(ui, "Fullscreen", "F").clicked() {

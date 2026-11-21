@@ -45,6 +45,9 @@ pub enum Icon {
     Music,
     Globe,
     Expand,
+    Scissors,
+    FramePrev,
+    FrameNext,
 }
 
 impl Icon {
@@ -280,6 +283,21 @@ impl Icon {
                 open_path(vec![p(10.5, 20.0), p(4.0, 20.0), p(4.0, 13.5)]);
                 line(p(20.0, 4.0), p(13.5, 10.5));
                 line(p(4.0, 20.0), p(10.5, 13.5));
+            }
+            Icon::Scissors => {
+                painter.circle_stroke(p(6.0, 7.0), 2.8 * u, stroke);
+                painter.circle_stroke(p(6.0, 17.0), 2.8 * u, stroke);
+                line(p(8.0, 15.0), p(20.5, 7.0));
+                line(p(8.0, 9.0), p(20.5, 17.0));
+                painter.circle_filled(p(12.0, 12.0), 1.2 * u, color);
+            }
+            Icon::FramePrev => {
+                line(p(6.5, 6.0), p(6.5, 18.0));
+                poly(vec![p(16.5, 7.5), p(16.5, 16.5), p(10.0, 12.0)]);
+            }
+            Icon::FrameNext => {
+                line(p(17.5, 6.0), p(17.5, 18.0));
+                poly(vec![p(7.5, 7.5), p(7.5, 16.5), p(14.0, 12.0)]);
             }
         }
     }

@@ -61,9 +61,9 @@ AirMedia is built around two screens: a library to browse and a player that gets
    right-click to add to or remove from the playlist or history. Progress bars show how far you got.
 3. **Videos / Music / Search**: responsive grids that stay smooth with thousands of items. `Ctrl + F` searches titles and folders.
 4. **Details**: *More Info* opens an overlay with artwork, metadata, *Resume* / *Start Over* and playlist actions.
-5. **Player**: edge-to-edge video with a back button and title on top, and the seek bar (floating timestamp, A-B markers) and
-   transport at the bottom: play/pause, ±10 s, volume (0–150%, with a 100% mark), elapsed / total or remaining time, previous /
-   next, shuffle, repeat, playlist, speed, **audio & subtitles** (tracks, delay, load a file), **settings** (speed, aspect ratio,
+5. **Player**: edge-to-edge video with a back button and title on top, and the seek bar (floating timestamp, A-B markers, draggable clip handles) and
+   transport at the bottom: contextual previous/next frame buttons when paused, play/pause, ±10 s, volume (0–150%, with a 100% mark), elapsed / total or remaining time, previous /
+   next, shuffle, repeat, clip mode (scissors), screenshot camera button, playlist, speed, **audio & subtitles** (tracks, delay, load a file), **settings** (speed, aspect ratio,
    hardware decoder, equalizer, screenshot, jump to time, A-B loop, media information, preferences) and fullscreen.
    Near the end of an item, a button jumps straight to the next one.
 6. **Music**: dimmed artwork fills the window behind the cover, title and a live spectrum visualizer.
@@ -78,6 +78,7 @@ AirMedia is built around two screens: a library to browse and a player that gets
 11. **Subtitles**: sidecar files (`movie.srt`, `movie.en.srt`, `.vtt`, `.ass`) load automatically; embedded text tracks are
     extracted in the background. UTF-8, UTF-16 and legacy Windows-1252 files are supported.
 12. **Auto-hide**: controls and the cursor hide after a configurable idle time while a video plays.
+13. **Clip mode & frame stepping**: cut clips with a docked clip bar (`X`), draggable seek handles, frame nudging, range preview looping, and fast (stream copy) or frame-accurate (re-encode) background export. Contextual previous/next frame buttons flank play/pause when paused.
 
 ---
 
@@ -98,6 +99,8 @@ AirMedia is built around two screens: a library to browse and a player that gets
 | `Ctrl + Left / Right` | Seek backward / forward 60s |
 | `Ctrl + G` | Jump to time |
 | `B` | A-B loop: set A, then B, then clear |
+| `X` | Toggle clip mode |
+| `Shift + [ / Shift + ]` | Clip mode: set start / end at playhead |
 | `Up / Down` | Volume up / down (5%) |
 | `M` | Mute / Unmute |
 | `Mouse wheel` | Adjust volume over the video |

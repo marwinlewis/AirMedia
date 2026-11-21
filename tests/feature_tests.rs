@@ -694,3 +694,189 @@ fn stopped_position_survives_and_old_session_entries_still_load() {
     let loaded: SessionState = serde_json::from_str(old).unwrap();
     assert_eq!(loaded.resume_progress(movie), Some((90.0, 0.0)));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Clip range and argument builder
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn test_clip_range_clamping() {
+    use airmedia::clip::{ClipRange, MIN_CLIP_SECS};
+
+    // Standard clamping on creation
+    let clip = ClipRange::new(5.0, 15.0, 60.0);
+    assert_eq!(clip.start, 5.0);
+    assert_eq!(clip.end, 15.0);
+    assert_eq!(clip.duration(), 10.0);
+
+    // Negative start is clamped to 0
+    let clip_neg = ClipRange::new(-5.0, 10.0, 60.0);
+    assert_eq!(clip_neg.start, 0.0);
+    assert_eq!(clip_neg.end, 10.0);
+
+    // End past total duration is clamped
+    let clip_over = ClipRange::new(50.0, 70.0, 60.0);
+    assert_eq!(clip_over.start, 50.0);
+    assert_eq!(clip_over.end, 60.0);
+
+    // Minimum length rule: end before start + MIN_CLIP_SECS
+    let clip_short = ClipRange::new(10.0, 10.01, 60.0);
+    assert!(clip_short.end >= clip_short.start + MIN_CLIP_SECS);
+
+    // Setting start pushes end if needed
+    let mut clip = ClipRange::new(5.0, 10.0, 60.0);
+    clip.set_start(12.0, 60.0);
+    assert_eq!(clip.start, 12.0);
+    assert!(clip.end >= 12.0 + MIN_CLIP_SECS);
+
+    // Setting end before start is rejected
+    assert!(!clip.set_end(10.0, 60.0));
+    assert!(clip.set_end(20.0, 60.0));
+    assert_eq!(clip.end, 20.0);
+
+    // default_for sets 10s or clamps to duration
+    let def = ClipRange::default_for(5.0, 60.0);
+    assert_eq!(def.start, 5.0);
+    assert_eq!(def.end, 15.0);
+
+    let def_edge = ClipRange::default_for(55.0, 60.0);
+    assert_eq!(def_edge.start, 55.0);
+    assert_eq!(def_edge.end, 60.0);
+
+    // Jump target logic
+    let clip = ClipRange::new(10.0, 20.0, 60.0);
+    assert_eq!(clip.jump_target(5.0), Some(10.0));
+    assert_eq!(clip.jump_target(15.0), None);
+    assert_eq!(clip.jump_target(20.0), Some(10.0));
+    assert_eq!(clip.jump_target(25.0), Some(10.0));
+}
+
+#[test]
+fn test_build_clip_args_fast_and_precise() {
+    use airmedia::clip::{build_clip_args, ClipExportMode, ClipRange};
+
+    let input = Path::new("video.mp4");
+    let output = Path::new("out.mp4");
+    let range = ClipRange::new(5.0, 15.0, 60.0);
+
+    // 1. Fast mode, audio enabled
+    let args_fast = build_clip_args(input, output, range, ClipExportMode::Fast, true);
+    // Verify -ss before -i in Fast mode
+    let ss_idx = args_fast.iter().position(|a| a == "-ss").expect("-ss present");
+    let i_idx = args_fast.iter().position(|a| a == "-i").expect("-i present");
+    assert!(ss_idx < i_idx, "Fast mode seeks before input");
+    assert_eq!(args_fast[ss_idx + 1], "5.000");
+
+    // Input passed ONLY through -i with protocol whitelist
+    let pw_idx = args_fast.iter().position(|a| a == "-protocol_whitelist").expect("protocol whitelist present");
+    assert_eq!(args_fast[pw_idx + 1], "file,crypto,data");
+    assert_eq!(args_fast[i_idx + 1], std::path::absolute(input).unwrap().to_string_lossy());
+    // Verify input path does not appear anywhere else
+    let count = args_fast.iter().filter(|a| a.contains("video.mp4")).count();
+    assert_eq!(count, 1, "input appears only once at -i");
+
+    // Fast mode specifics: -c copy -avoid_negative_ts make_zero
+    assert!(args_fast.contains(&"-c".to_string()));
+    assert!(args_fast.contains(&"copy".to_string()));
+    assert!(args_fast.contains(&"-avoid_negative_ts".to_string()));
+    assert!(args_fast.contains(&"make_zero".to_string()));
+    assert!(args_fast.contains(&"-map".to_string()));
+    assert!(args_fast.contains(&"0:v?".to_string()));
+    assert!(args_fast.contains(&"0:a?".to_string()));
+    assert!(args_fast.contains(&"-progress".to_string()));
+    assert!(args_fast.contains(&"pipe:1".to_string()));
+    assert!(args_fast.contains(&"-nostats".to_string()));
+    assert_eq!(args_fast.last().unwrap(), &output.to_string_lossy().to_string());
+
+    // 2. Fast mode, audio OFF (include_audio: false)
+    let args_fast_no_audio = build_clip_args(input, output, range, ClipExportMode::Fast, false);
+    assert!(args_fast_no_audio.contains(&"-an".to_string()), "-an must be present when include_audio is false");
+    assert!(!args_fast_no_audio.contains(&"0:a?".to_string()), "audio stream should not be mapped");
+
+    // 3. Precise mode, audio enabled
+    let args_precise = build_clip_args(input, output, range, ClipExportMode::Precise, true);
+    let ss_idx = args_precise.iter().position(|a| a == "-ss").expect("-ss present");
+    let i_idx = args_precise.iter().position(|a| a == "-i").expect("-i present");
+    assert!(ss_idx < i_idx, "Precise mode seeks on the input (accurate when re-encoding, and fast)");
+    assert!(args_precise.contains(&"libx264".to_string()));
+    assert!(args_precise.contains(&"aac".to_string()));
+    assert!(args_precise.contains(&"-progress".to_string()));
+    assert!(args_precise.contains(&"pipe:1".to_string()));
+    assert!(args_precise.contains(&"-nostats".to_string()));
+
+    // 4. Precise mode, audio OFF (include_audio: false)
+    let args_precise_no_audio = build_clip_args(input, output, range, ClipExportMode::Precise, false);
+    assert!(args_precise_no_audio.contains(&"-an".to_string()), "-an must be present in precise mode when audio is off");
+    assert!(!args_precise_no_audio.contains(&"aac".to_string()), "aac encoder should not be present when audio is off");
+}
+
+#[test]
+fn test_precise_uses_h264_aac() {
+    use airmedia::clip::{build_clip_args, ClipExportMode, ClipRange, PRECISE_EXTENSIONS};
+    let range = ClipRange::new(1.0, 3.0, 60.0);
+    let mkv = build_clip_args(Path::new("in.mkv"), Path::new("out.mkv"), range, ClipExportMode::Precise, true);
+    assert!(mkv.contains(&"libx264".to_string()) && mkv.contains(&"aac".to_string()));
+    assert!(!PRECISE_EXTENSIONS.contains(&"webm"), "WebM can't hold H.264, so Precise must not write it");
+}
+
+#[test]
+fn test_validate_clip_output() {
+    use airmedia::clip::validate_clip_output;
+    let dir = temp_dir("clip_validate");
+    let src = dir.join("movie.mp4");
+    std::fs::write(&src, b"x").unwrap();
+
+    assert_eq!(validate_clip_output(&src, &dir, "clip.mp4").unwrap(), dir.join("clip.mp4"));
+    assert!(validate_clip_output(&src, &dir, "  ").is_err(), "empty name");
+    assert!(validate_clip_output(&src, &dir, "../clip.mp4").is_err(), "parent traversal");
+    assert!(validate_clip_output(&src, &dir, "sub/clip.mp4").is_err(), "forward slash");
+    assert!(validate_clip_output(&src, &dir, r"sub\clip.mp4").is_err(), "backslash");
+    assert!(validate_clip_output(&src, &dir, "clip").is_err(), "no extension");
+    assert!(validate_clip_output(&src, &dir, "movie.mp4").is_err(), "would overwrite the source");
+    #[cfg(windows)]
+    assert!(validate_clip_output(&src, &dir, "MOVIE.MP4").is_err(), "case-insensitive on Windows");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Runs a real export when ffmpeg is installed: a finished clip must survive the job being
+/// dropped, and a cancelled export must leave no partial file.
+#[test]
+fn test_clip_export_job_keeps_finished_file_and_cleans_cancelled() {
+    use airmedia::clip::{ClipExportMode, ClipRange};
+    use airmedia::media::clip_export::{ClipExportJob, ClipExportPoll};
+    use std::time::{Duration, Instant};
+
+    if !airmedia::media::dependency::check_dependencies().is_ready() {
+        eprintln!("ffmpeg not found; skipping export job test");
+        return;
+    }
+    let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_media.mp4");
+    let dir = temp_dir("clip_export_job");
+    let wait = |job: &mut ClipExportJob| {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            match job.poll() {
+                ClipExportPoll::Running { .. } if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(30)),
+                other => return other,
+            }
+        }
+    };
+
+    for mode in [ClipExportMode::Fast, ClipExportMode::Precise] {
+        let out = dir.join(format!("clip_{mode:?}.mp4"));
+        let mut job = ClipExportJob::start(&input, &out, ClipRange { start: 1.0, end: 3.0 }, mode, true).unwrap();
+        let res = wait(&mut job);
+        assert!(matches!(res, ClipExportPoll::Success(_)), "{mode:?} export failed: {res:?}");
+        drop(job);
+        assert!(out.exists(), "{mode:?}: finished clip must not be deleted when the job is dropped");
+    }
+
+    let out = dir.join("clip_cancelled.mp4");
+    let mut job = ClipExportJob::start(&input, &out, ClipRange { start: 0.0, end: 4.0 }, ClipExportMode::Precise, true).unwrap();
+    job.cancel();
+    assert!(matches!(job.poll(), ClipExportPoll::Cancelled));
+    drop(job); // joins the worker, which removes the partial file
+    assert!(!out.exists(), "cancelled export must not leave a partial file");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

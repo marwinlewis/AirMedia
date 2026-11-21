@@ -16,6 +16,8 @@ pub struct PreferencesState {
     pub hw_accel: HwAccelMode,
     /// Keep the player window above other windows (Ctrl+T / app menu).
     pub always_on_top: bool,
+    pub last_clip_folder: Option<PathBuf>,
+    pub last_clip_mode: crate::clip::ClipExportMode,
 }
 
 impl Default for PreferencesState {
@@ -28,6 +30,8 @@ impl Default for PreferencesState {
             screenshot_format: ScreenshotFormat::Jpg,
             hw_accel: HwAccelMode::Auto,
             always_on_top: false,
+            last_clip_folder: None,
+            last_clip_mode: crate::clip::ClipExportMode::Fast,
         }
     }
 }

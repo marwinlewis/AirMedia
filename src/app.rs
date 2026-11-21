@@ -7,8 +7,8 @@ use crate::playlist::{Playlist, RepeatMode};
 use crate::ui::about_dialog::AboutDialog;
 use crate::ui::artwork::ArtworkCache;
 use crate::ui::browse::{self, BrowseAction, BrowseCx, BrowseState, NAV_HEIGHT};
-use crate::ui::codec_dialog::{CodecDialog, CodecDialogState};
 use crate::ui::canvas::{AspectRatioMode, AudioStage, VideoCanvas};
+use crate::ui::codec_dialog::{CodecDialog, CodecDialogState};
 use crate::ui::controls::{ControlsCtx, ControlsView, BOTTOM_CONTROLS_H};
 use crate::ui::equalizer_dialog::EqualizerDialog;
 use crate::ui::info_dialog::InfoDialog;
@@ -24,7 +24,10 @@ use crate::ui::stream_dialog::StreamDialog;
 use crate::ui::theme::Theme;
 use crate::ui::window_chrome;
 
-use eframe::egui::{self, Align2, Key, Popup, PopupCloseBehavior, Pos2, Rect, Response, Sense, Stroke, Ui, UiBuilder, Vec2};
+use eframe::egui::{
+    self, Align2, Key, Popup, PopupCloseBehavior, Pos2, Rect, Response, Sense, Stroke, Ui,
+    UiBuilder, Vec2,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -97,6 +100,12 @@ pub struct AirMediaApp {
     controls_hovered: bool,
     /// Whether the controls were showing when the current press began (touch toggling).
     controls_up_at_press: bool,
+    pub clip_mode: bool,
+    pub clip_range: Option<crate::clip::ClipRange>,
+    pub clip_preview: bool,
+    pub show_clip_dialog: bool,
+    pub clip_dialog_state: Option<crate::ui::clip_dialog::ClipDialogState>,
+    pub clip_export: Option<crate::media::clip_export::ClipExportJob>,
 }
 
 impl AirMediaApp {
@@ -104,7 +113,11 @@ impl AirMediaApp {
         let codec_state = CodecDialogState::default();
         let show_codecs = !codec_state.status.is_ready();
         let preferences_state = PreferencesState::load();
-        let session = if incognito { incognito_session(SessionState::load()) } else { SessionState::load() };
+        let session = if incognito {
+            incognito_session(SessionState::load())
+        } else {
+            SessionState::load()
+        };
 
         let mut player = MediaPlayer::new();
         player.hw_accel = preferences_state.hw_accel;
@@ -163,6 +176,12 @@ impl AirMediaApp {
             details: None,
             controls_hovered: false,
             controls_up_at_press: false,
+            clip_mode: false,
+            clip_range: None,
+            clip_preview: false,
+            show_clip_dialog: false,
+            clip_dialog_state: None,
+            clip_export: None,
         }
     }
 
@@ -173,6 +192,77 @@ impl AirMediaApp {
     /// A toast that stays long enough to read an error message.
     pub fn set_error_toast(&mut self, msg: impl Into<String>) {
         self.toast = Some((msg.into(), Instant::now(), 4.0));
+    }
+
+    pub fn toggle_clip_mode(&mut self) {
+        let is_audio = self
+            .player
+            .media_info
+            .as_ref()
+            .is_some_and(|m| m.primary_video_stream().is_none());
+        let is_stream = self
+            .player
+            .current_file
+            .as_ref()
+            .is_some_and(|p| crate::media::is_url(p));
+        let dur = self.player.duration_secs;
+        if is_audio || is_stream || dur <= 0.0 || self.player.current_file.is_none() {
+            if is_stream {
+                self.set_toast("Clipping is not available for network streams");
+            }
+            return;
+        }
+
+        self.clip_mode = !self.clip_mode;
+        if self.clip_mode {
+            let cur = self.player.current_time_secs();
+            if self.clip_range.is_none() {
+                self.clip_range = Some(crate::clip::ClipRange::default_for(cur, dur));
+            }
+            self.set_toast("Clip mode on");
+        } else {
+            self.clip_preview = false;
+            self.set_toast("Clip mode off");
+        }
+    }
+
+    pub fn toggle_clip_preview(&mut self) {
+        let Some(range) = self.clip_range else { return };
+        self.clip_preview = !self.clip_preview;
+        if self.clip_preview {
+            self.player.seek(range.start);
+            if !self.player.is_playing {
+                self.player.resume();
+            }
+            self.set_toast("Previewing clip");
+        } else {
+            self.set_toast("Preview stopped");
+        }
+    }
+
+    pub fn open_clip_dialog(&mut self) {
+        let Some(file) = self.player.current_file.clone() else {
+            return;
+        };
+        let Some(range) = self.clip_range else { return };
+        self.clip_dialog_state = Some(crate::ui::clip_dialog::ClipDialogState::new(
+            &file,
+            range,
+            &self.preferences_state,
+        ));
+        self.show_clip_dialog = true;
+    }
+
+    pub fn take_screenshot(&mut self) {
+        if self.player.current_file.is_some() {
+            match self.player.take_screenshot(
+                &self.preferences_state.screenshot_dir,
+                self.preferences_state.screenshot_format,
+            ) {
+                Ok(path) => self.set_toast(format!("Screenshot saved: {}", path.display())),
+                Err(e) => self.set_toast(format!("Screenshot failed: {e}")),
+            }
+        }
     }
 
     /// Expands files, folders, playlists and URLs, appends the media to the playlist and
@@ -203,7 +293,11 @@ impl AirMediaApp {
                 self.set_toast(format!("Added {added} items to the playlist"));
             }
         } else if added > 0 {
-            self.set_toast(if added == 1 { "Added to playlist".to_string() } else { format!("Added {added} items to the playlist") });
+            self.set_toast(if added == 1 {
+                "Added to playlist".to_string()
+            } else {
+                format!("Added {added} items to the playlist")
+            });
         }
 
         for sub in collected.subtitles {
@@ -223,7 +317,9 @@ impl AirMediaApp {
 
     /// Loads playlist item `idx`. Errors surface through `player.take_error()`.
     fn play_index(&mut self, idx: usize) {
-        let Some(path) = self.playlist.items.get(idx).map(|i| i.path.clone()) else { return };
+        let Some(path) = self.playlist.items.get(idx).map(|i| i.path.clone()) else {
+            return;
+        };
         self.playlist.current_index = Some(idx);
         let _ = self.player.load_file(&path);
     }
@@ -237,6 +333,14 @@ impl AirMediaApp {
         if changed {
             self.ab_loop.clear();
             self.canvas.clear();
+            self.clip_mode = false;
+            self.clip_range = None;
+            self.clip_preview = false;
+            self.show_clip_dialog = false;
+            self.clip_dialog_state = None;
+            if let Some(mut job) = self.clip_export.take() {
+                job.cancel();
+            }
             if current.is_some() {
                 self.view = View::Player;
             }
@@ -249,7 +353,8 @@ impl AirMediaApp {
                 self.session.push_recent(path);
                 if !is_url(path) {
                     if let Some(pos) = self.session.resume_position(path) {
-                        if pos < self.player.duration_secs * crate::persistence::RESUME_MAX_FRACTION {
+                        if pos < self.player.duration_secs * crate::persistence::RESUME_MAX_FRACTION
+                        {
                             self.player.seek(pos);
                             self.set_toast(format!("Resumed at {}", format_clock(pos)));
                         }
@@ -301,7 +406,8 @@ impl AirMediaApp {
         }
         #[cfg(not(target_os = "android"))]
         {
-            let spawned = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg(INCOGNITO_FLAG).spawn());
+            let spawned = std::env::current_exe()
+                .and_then(|exe| std::process::Command::new(exe).arg(INCOGNITO_FLAG).spawn());
             if let Err(e) = spawned {
                 self.set_error_toast(format!("Couldn't open an incognito window: {e}"));
             }
@@ -361,6 +467,14 @@ impl AirMediaApp {
     /// `track_current_file`, so a stopped item can be resumed from its card.
     fn close_media(&mut self) {
         self.player.unload();
+        self.clip_mode = false;
+        self.clip_range = None;
+        self.clip_preview = false;
+        self.show_clip_dialog = false;
+        self.clip_dialog_state = None;
+        if let Some(mut job) = self.clip_export.take() {
+            job.cancel();
+        }
         self.view = View::Browse;
     }
 
@@ -447,7 +561,10 @@ impl AirMediaApp {
         let video = info.and_then(|m| m.video_dimensions());
         let audio_only = info.is_some_and(|m| m.primary_video_stream().is_none());
         if audio_only {
-            let title = info.and_then(|m| m.title()).filter(|t| !t.trim().is_empty()).unwrap_or_else(|| display_title(path));
+            let title = info
+                .and_then(|m| m.title())
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| display_title(path));
             let credit: Vec<String> = [info.and_then(|m| m.artist()), info.and_then(|m| m.album())]
                 .into_iter()
                 .flatten()
@@ -455,10 +572,16 @@ impl AirMediaApp {
                 .collect();
             Some((title, credit.join(" \u{00b7} ")))
         } else {
-            let codec = info.and_then(|m| m.primary_video_stream()).and_then(|v| v.codec_name.as_deref());
+            let codec = info
+                .and_then(|m| m.primary_video_stream())
+                .and_then(|v| v.codec_name.as_deref());
             let mut tech = Vec::new();
             if let Some((_, h)) = video {
-                tech.push(if h >= 2000 { "4K".to_string() } else { format!("{h}p") });
+                tech.push(if h >= 2000 {
+                    "4K".to_string()
+                } else {
+                    format!("{h}p")
+                });
             }
             if let Some(c) = codec {
                 tech.push(c.to_uppercase());
@@ -496,7 +619,11 @@ impl AirMediaApp {
             self.set_toast(format!("Loop A: {}", format_clock(t)));
         } else if self.ab_loop.set_b(t) {
             let a = self.ab_loop.a.unwrap_or(0.0);
-            self.set_toast(format!("Loop A-B: {} - {}", format_clock(a), format_clock(t)));
+            self.set_toast(format!(
+                "Loop A-B: {} - {}",
+                format_clock(a),
+                format_clock(t)
+            ));
         } else {
             self.set_toast("Loop B must be after A");
         }
@@ -521,7 +648,11 @@ impl AirMediaApp {
         if play_pause {
             if has_media {
                 self.player.toggle_play();
-            } else if let Some(idx) = self.playlist.current_index.or((!self.playlist.items.is_empty()).then_some(0)) {
+            } else if let Some(idx) =
+                self.playlist
+                    .current_index
+                    .or((!self.playlist.items.is_empty()).then_some(0))
+            {
                 self.play_index(idx);
             }
         }
@@ -581,25 +712,21 @@ impl AirMediaApp {
             } else {
                 let up_next = self.playlist.current_item().map(|i| i.path.clone());
                 if let Some((idx, _)) = self.library.featured(None, up_next.as_deref()) {
-                    self.actions.push(BrowseAction::Play(self.library.entries[idx].path.clone()));
+                    self.actions
+                        .push(BrowseAction::Play(self.library.entries[idx].path.clone()));
                 }
             }
         }
 
         // S: Stop
-        if has_media && input.key_pressed(Key::S) && !input.modifiers.ctrl && !input.modifiers.shift {
+        if has_media && input.key_pressed(Key::S) && !input.modifiers.ctrl && !input.modifiers.shift
+        {
             self.close_media();
         }
 
         // Shift+S: Take Screenshot
         if has_media && input.modifiers.shift && input.key_pressed(Key::S) {
-            match self.player.take_screenshot(
-                &self.preferences_state.screenshot_dir,
-                self.preferences_state.screenshot_format,
-            ) {
-                Ok(path) => self.set_toast(format!("Screenshot saved: {}", path.display())),
-                Err(e) => self.set_toast(format!("Screenshot failed: {e}")),
-            }
+            self.take_screenshot();
         }
 
         // M: Mute toggle
@@ -661,13 +788,13 @@ impl AirMediaApp {
             self.set_toast("Previous frame");
         }
 
-        // Speed: [ and ]
-        if has_media && input.key_pressed(Key::OpenBracket) {
+        // Speed: [ and ] (without Shift)
+        if has_media && input.key_pressed(Key::OpenBracket) && !shift {
             let spd = (self.player.playback_speed - 0.25).max(0.25);
             self.player.set_speed(spd);
             self.set_toast(format!("Speed {spd}×"));
         }
-        if has_media && input.key_pressed(Key::CloseBracket) {
+        if has_media && input.key_pressed(Key::CloseBracket) && !shift {
             let spd = (self.player.playback_speed + 0.25).min(2.5);
             self.player.set_speed(spd);
             self.set_toast(format!("Speed {spd}×"));
@@ -675,6 +802,60 @@ impl AirMediaApp {
         if has_media && (input.key_pressed(Key::Backspace) || input.key_pressed(Key::Equals)) {
             self.player.set_speed(1.0);
             self.set_toast("Speed 1×");
+        }
+
+        // Clip mode: X toggles clip bar; Shift+[ and Shift+] set start and end points
+        if has_media && !ctrl && !shift && input.key_pressed(Key::X) {
+            let is_stream = self
+                .player
+                .current_file
+                .as_ref()
+                .is_some_and(|p| crate::media::is_url(p));
+            if is_stream {
+                self.set_toast("Clipping is not available for network streams");
+            } else if self.player.duration_secs <= 0.0 {
+                self.set_toast("Clipping requires media with known duration");
+            } else {
+                self.toggle_clip_mode();
+            }
+        }
+        // With Shift held most layouts report `{` / `}` rather than `[` / `]`, so accept both.
+        let clip_start_key = input.key_pressed(Key::OpenCurlyBracket) || (shift && input.key_pressed(Key::OpenBracket));
+        let clip_end_key = input.key_pressed(Key::CloseCurlyBracket) || (shift && input.key_pressed(Key::CloseBracket));
+        if has_media && !ctrl && clip_start_key && self.clip_mode {
+            let cur = self.player.current_time_secs();
+            let dur = self.player.duration_secs;
+            let msg = if let Some(ref mut range) = self.clip_range {
+                range.set_start(cur, dur);
+                Some(format!(
+                    "Clip start: {}",
+                    crate::clip::format_time_millis(range.start)
+                ))
+            } else {
+                None
+            };
+            if let Some(m) = msg {
+                self.set_toast(m);
+            }
+        }
+        if has_media && !ctrl && clip_end_key && self.clip_mode {
+            let cur = self.player.current_time_secs();
+            let dur = self.player.duration_secs;
+            let msg = if let Some(ref mut range) = self.clip_range {
+                if range.set_end(cur, dur) {
+                    Some(format!(
+                        "Clip end: {}",
+                        crate::clip::format_time_millis(range.end)
+                    ))
+                } else {
+                    Some("Clip end must be after start".to_string())
+                }
+            } else {
+                None
+            };
+            if let Some(m) = msg {
+                self.set_toast(m);
+            }
         }
 
         // Playlist Next / Prev: N / P
@@ -704,7 +885,11 @@ impl AirMediaApp {
         // Ctrl+T: always on top
         if ctrl && input.key_pressed(Key::T) {
             self.preferences_state.always_on_top = !self.preferences_state.always_on_top;
-            self.set_toast(if self.preferences_state.always_on_top { "Always on top" } else { "Always on top off" });
+            self.set_toast(if self.preferences_state.always_on_top {
+                "Always on top"
+            } else {
+                "Always on top off"
+            });
         }
 
         // Ctrl+L or L: Toggle playlist
@@ -799,6 +984,8 @@ impl AirMediaApp {
             || self.show_codecs
             || self.show_shortcuts
             || self.show_jump
+            || self.show_clip_dialog
+            || self.clip_export.is_some()
             || self.details.is_some()
     }
 
@@ -823,6 +1010,7 @@ impl AirMediaApp {
         let mut open_jump = false;
         let mut stop_request = false;
         let mut open_incognito = false;
+        let mut take_screenshot = false;
         let mut always_on_top = self.preferences_state.always_on_top;
         Popup::menu(button)
             .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
@@ -853,12 +1041,16 @@ impl AirMediaApp {
                         prefs: &self.preferences_state,
                         incognito: self.incognito,
                         open_incognito: &mut open_incognito,
+                        take_screenshot: &mut take_screenshot,
                     },
                 );
             });
         self.preferences_state.always_on_top = always_on_top;
         if let Some(t) = toast {
             self.set_toast(t);
+        }
+        if take_screenshot {
+            self.take_screenshot();
         }
         if let Some(req) = open_request {
             self.open_paths(req.paths, req.play);
@@ -878,7 +1070,14 @@ impl AirMediaApp {
     }
 
     /// The library, with the now-playing bar docked under it when something is loaded.
-    fn browse_screen(&mut self, ui: &mut Ui, ctx: &egui::Context, rect: Rect, nav_rect: Rect, levels: [f32; 16]) {
+    fn browse_screen(
+        &mut self,
+        ui: &mut Ui,
+        ctx: &egui::Context,
+        rect: Rect,
+        nav_rect: Rect,
+        levels: [f32; 16],
+    ) {
         self.refresh_library();
 
         let labels = self.now_labels();
@@ -894,7 +1093,11 @@ impl AirMediaApp {
 
         let current = self.player.current_file.clone();
         let up_next = self.playlist.current_item().map(|i| i.path.clone());
-        let is_video = self.player.media_info.as_ref().is_some_and(|m| m.primary_video_stream().is_some());
+        let is_video = self
+            .player
+            .media_info
+            .as_ref()
+            .is_some_and(|m| m.primary_video_stream().is_some());
         let mut cx = BrowseCx {
             library: &self.library,
             art: &mut self.artwork,
@@ -917,7 +1120,9 @@ impl AirMediaApp {
         let mut details_closed = false;
         if let Some(path) = &self.details {
             match self.library.position(path) {
-                Some(idx) => details_closed = browse::details_modal(ctx, &self.library.entries[idx], &mut cx),
+                Some(idx) => {
+                    details_closed = browse::details_modal(ctx, &self.library.entries[idx], &mut cx)
+                }
                 None => details_closed = true,
             }
         }
@@ -925,7 +1130,9 @@ impl AirMediaApp {
             self.details = None;
         }
 
-        if let (Some(bar), Some(path), Some((title, subtitle))) = (bar_rect, current.as_deref(), &labels) {
+        if let (Some(bar), Some(path), Some((title, subtitle))) =
+            (bar_rect, current.as_deref(), &labels)
+        {
             let out = mini_player::show(
                 ui,
                 bar,
@@ -956,14 +1163,27 @@ impl AirMediaApp {
     }
 
     /// Edge-to-edge playback with controls that fade away.
-    fn player_screen(&mut self, ui: &mut Ui, ctx: &egui::Context, rect: Rect, top_rect: Rect, subtitle: Option<&str>, levels: [f32; 16]) {
+    fn player_screen(
+        &mut self,
+        ui: &mut Ui,
+        ctx: &egui::Context,
+        rect: Rect,
+        top_rect: Rect,
+        subtitle: Option<&str>,
+        levels: [f32; 16],
+    ) {
         let Some((title, sub_label)) = self.now_labels() else {
             self.view = View::Browse;
             return;
         };
-        let audio_only = self.player.media_info.as_ref().is_some_and(|m| m.primary_video_stream().is_none());
+        let audio_only = self
+            .player
+            .media_info
+            .as_ref()
+            .is_some_and(|m| m.primary_video_stream().is_none());
 
-        let idle = self.last_mouse_activity.elapsed().as_secs_f32() >= self.preferences_state.auto_hide_seconds;
+        let idle = self.last_mouse_activity.elapsed().as_secs_f32()
+            >= self.preferences_state.auto_hide_seconds;
         let keep_up = !self.player.is_playing
             || audio_only
             || self.controls_hovered
@@ -972,10 +1192,18 @@ impl AirMediaApp {
             || self.any_dialog_open()
             || Popup::is_any_open(ctx);
         let controls_up = keep_up || !idle;
-        let opacity = ctx.animate_bool_with_time(egui::Id::unique("player_controls_fade"), controls_up, 0.22);
+        let opacity =
+            ctx.animate_bool_with_time(egui::Id::unique("player_controls_fade"), controls_up, 0.22);
         if ctx.input(|i| i.pointer.any_pressed()) {
             self.controls_up_at_press = opacity > 0.5;
         }
+
+        let bottom_controls_h = BOTTOM_CONTROLS_H
+            + if self.clip_mode {
+                crate::ui::controls::CLIP_BAR_H + 8.0
+            } else {
+                0.0
+            };
 
         let canvas = if audio_only {
             let path = self.player.current_file.clone().unwrap_or_default();
@@ -988,12 +1216,22 @@ impl AirMediaApp {
                     title: &title,
                     subtitle: &sub_label,
                     levels: &levels,
-                    bottom_inset: BOTTOM_CONTROLS_H,
+                    bottom_inset: bottom_controls_h,
                 },
             )
         } else {
-            let lift = if controls_up { BOTTOM_CONTROLS_H + 12.0 } else { 0.0 };
-            self.canvas.show_video(ui, rect, subtitle, self.preferences_state.subtitle_size, lift)
+            let lift = if controls_up {
+                bottom_controls_h + 12.0
+            } else {
+                0.0
+            };
+            self.canvas.show_video(
+                ui,
+                rect,
+                subtitle,
+                self.preferences_state.subtitle_size,
+                lift,
+            )
         };
 
         let touch = ctx.input(|i| i.has_touch_screen());
@@ -1024,9 +1262,27 @@ impl AirMediaApp {
 
         let up_next = self.playlist.peek_next().map(|i| display_title(&i.path));
         let has_queue = self.playlist.items.len() > 1;
+        let is_stream = self
+            .player
+            .current_file
+            .as_ref()
+            .is_some_and(|p| crate::media::is_url(p));
+        let can_clip = !audio_only
+            && !is_stream
+            && self.player.duration_secs > 0.0
+            && self.player.current_file.is_some();
         let mut toast = None;
-        let (mut toggle_fs, mut cycle_ab, mut open_jump, mut go_back, mut play_next, mut play_prev) =
-            (false, false, false, false, false, false);
+        let (
+            mut toggle_fs,
+            mut cycle_ab,
+            mut open_jump,
+            mut go_back,
+            mut play_next,
+            mut play_prev,
+            mut take_screenshot,
+        ) = (false, false, false, false, false, false, false);
+        let (mut toggle_clip_mode, mut toggle_clip_preview, mut open_clip_dialog) =
+            (false, false, false);
         let output = self.controls.show(
             ui,
             rect,
@@ -1056,6 +1312,14 @@ impl AirMediaApp {
                 repeat: &mut self.playlist.repeat_mode,
                 has_queue,
                 audio_only,
+                take_screenshot: &mut take_screenshot,
+                can_clip,
+                clip_mode: self.clip_mode,
+                clip_range: self.clip_range.as_mut(),
+                clip_preview: self.clip_preview,
+                toggle_clip_mode: &mut toggle_clip_mode,
+                toggle_clip_preview: &mut toggle_clip_preview,
+                open_clip_dialog: &mut open_clip_dialog,
             },
         );
 
@@ -1065,6 +1329,9 @@ impl AirMediaApp {
         }
         if let Some(t) = toast {
             self.set_toast(t);
+        }
+        if take_screenshot {
+            self.take_screenshot();
         }
         if toggle_fs {
             self.toggle_fullscreen(ctx);
@@ -1080,6 +1347,15 @@ impl AirMediaApp {
         }
         if play_prev {
             self.play_prev();
+        }
+        if toggle_clip_mode {
+            self.toggle_clip_mode();
+        }
+        if toggle_clip_preview {
+            self.toggle_clip_preview();
+        }
+        if open_clip_dialog {
+            self.open_clip_dialog();
         }
         if go_back {
             self.view = View::Browse;
@@ -1109,6 +1385,30 @@ impl eframe::App for AirMediaApp {
         if let Some(err) = self.player.take_error() {
             self.set_error_toast(err);
         }
+        if let Some(ref mut job) = self.clip_export {
+            match job.poll() {
+                crate::media::clip_export::ClipExportPoll::Running { .. } => {}
+                crate::media::clip_export::ClipExportPoll::Success(path) => {
+                    self.set_toast("Clip saved");
+                    if let Some(ref mut state) = self.clip_dialog_state {
+                        state.saved_path = Some(path);
+                    }
+                    self.clip_export = None;
+                }
+                crate::media::clip_export::ClipExportPoll::Failed(err) => {
+                    self.set_error_toast(format!("Clip export failed: {err}"));
+                    if let Some(ref mut state) = self.clip_dialog_state {
+                        state.error_msg = Some(err);
+                    }
+                    self.clip_export = None;
+                }
+                crate::media::clip_export::ClipExportPoll::Cancelled => {
+                    self.set_toast("Clip export cancelled");
+                    self.clip_export = None;
+                    self.show_clip_dialog = false;
+                }
+            }
+        }
         self.track_current_file();
         if self.preferences_state.hw_accel != self.player.hw_accel {
             // Keep the decoder choice made via H / the settings chip for the next launch.
@@ -1121,7 +1421,8 @@ impl eframe::App for AirMediaApp {
             ctx.request_repaint();
         }
 
-        let (current_pointer, pressed) = ctx.input(|i| (i.pointer.hover_pos(), i.pointer.any_pressed()));
+        let (current_pointer, pressed) =
+            ctx.input(|i| (i.pointer.hover_pos(), i.pointer.any_pressed()));
         if pressed {
             self.last_mouse_activity = Instant::now();
         }
@@ -1142,14 +1443,24 @@ impl eframe::App for AirMediaApp {
         self.handle_end_of_media();
         if self.player.is_playing && !self.controls.is_seeking {
             let t = self.player.current_time_secs();
-            if let Some(a) = self.ab_loop.jump_target(t) {
+            if self.clip_preview && self.clip_mode {
+                if let Some(range) = self.clip_range {
+                    if let Some(target) = range.jump_target(t) {
+                        self.player.seek(target);
+                    }
+                }
+            } else if let Some(a) = self.ab_loop.jump_target(t) {
                 self.player.seek(a);
             }
         }
 
         let on_top = self.preferences_state.always_on_top;
         if self.applied_always_on_top != Some(on_top) {
-            let level = if on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
+            let level = if on_top {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            };
             ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
             if self.applied_always_on_top.is_some() {
                 self.preferences_state.save();
@@ -1157,7 +1468,11 @@ impl eframe::App for AirMediaApp {
             self.applied_always_on_top = Some(on_top);
         }
 
-        let app_name = if self.incognito { "AirMedia (Incognito)" } else { "AirMedia" };
+        let app_name = if self.incognito {
+            "AirMedia (Incognito)"
+        } else {
+            "AirMedia"
+        };
         let window_title = match self.now_labels() {
             Some((title, _)) => format!("{title} \u{2014} {app_name}"),
             None => app_name.to_string(),
@@ -1185,9 +1500,18 @@ impl eframe::App for AirMediaApp {
                     ),
                     full_window_rect.max,
                 );
-                let mut drawer_host = ui.new_child(UiBuilder::new().id_salt("playlist_host").max_rect(drawer_rect));
+                let mut drawer_host = ui.new_child(
+                    UiBuilder::new()
+                        .id_salt("playlist_host")
+                        .max_rect(drawer_rect),
+                );
                 // The playlist drawer docks to the right of either screen, below the custom top bar.
-                PlaylistView::show(&mut drawer_host, &mut self.playlist, &mut self.player, &mut self.show_playlist);
+                PlaylistView::show(
+                    &mut drawer_host,
+                    &mut self.playlist,
+                    &mut self.player,
+                    &mut self.show_playlist,
+                );
 
                 let remaining = drawer_host.available_rect_before_wrap();
                 let content_rect = Rect::from_min_max(
@@ -1199,11 +1523,28 @@ impl eframe::App for AirMediaApp {
                     Vec2::new(full_window_rect.width(), NAV_HEIGHT),
                 );
                 let _ = ui.allocate_rect(full_window_rect, Sense::hover());
-                let mut screen = ui.new_child(UiBuilder::new().id_salt("screen").max_rect(full_window_rect));
+                let mut screen = ui.new_child(
+                    UiBuilder::new()
+                        .id_salt("screen")
+                        .max_rect(full_window_rect),
+                );
                 screen.shrink_clip_rect(full_window_rect);
                 match self.view {
-                    View::Browse => self.browse_screen(&mut screen, &ctx, content_rect, nav_rect, visualizer_levels),
-                    View::Player => self.player_screen(&mut screen, &ctx, content_rect, nav_rect, active_subtitle.as_deref(), visualizer_levels),
+                    View::Browse => self.browse_screen(
+                        &mut screen,
+                        &ctx,
+                        content_rect,
+                        nav_rect,
+                        visualizer_levels,
+                    ),
+                    View::Player => self.player_screen(
+                        &mut screen,
+                        &ctx,
+                        content_rect,
+                        nav_rect,
+                        active_subtitle.as_deref(),
+                        visualizer_levels,
+                    ),
                 }
 
                 // Toast HUD
@@ -1226,17 +1567,26 @@ impl eframe::App for AirMediaApp {
 
         // Dialogs
         InfoDialog::show(ui, &self.player, &mut self.show_info);
-        let effects = EqualizerDialog::show(ui, &mut self.session.equalizer, &mut self.show_equalizer);
+        let effects =
+            EqualizerDialog::show(ui, &mut self.session.equalizer, &mut self.show_equalizer);
         if effects.audio {
-            self.player.set_audio_filter(self.session.equalizer.audio_filter());
+            self.player
+                .set_audio_filter(self.session.equalizer.audio_filter());
         }
         if effects.video {
-            self.player.set_video_filter(self.session.equalizer.video_filter());
+            self.player
+                .set_video_filter(self.session.equalizer.video_filter());
         }
-        if let Some(url) = StreamDialog::show(ui, &mut self.stream_url_input, &mut self.show_stream) {
+        if let Some(url) = StreamDialog::show(ui, &mut self.stream_url_input, &mut self.show_stream)
+        {
             self.open_paths(vec![url], true);
         }
-        PreferencesDialog::show(ui, &mut self.player, &mut self.preferences_state, &mut self.show_preferences);
+        PreferencesDialog::show(
+            ui,
+            &mut self.player,
+            &mut self.preferences_state,
+            &mut self.show_preferences,
+        );
         AboutDialog::show(ui, &mut self.show_about, &mut self.logo_cache);
         ShortcutsDialog::show(ui, &mut self.show_shortcuts);
         let duration = self.player.duration_secs;
@@ -1245,6 +1595,26 @@ impl eframe::App for AirMediaApp {
             self.set_toast(format!("Jumped to {}", format_clock(t)));
         }
         CodecDialog::show(ui, &mut self.codec_state, &mut self.show_codecs);
+
+        if self.show_clip_dialog {
+            if let Some(ref mut state) = self.clip_dialog_state {
+                let cur = self.player.current_time_secs();
+                let dur = self.player.duration_secs;
+                let range = self
+                    .clip_range
+                    .unwrap_or_else(|| crate::clip::ClipRange::default_for(cur, dur));
+                let current_file = self.player.current_file.as_deref();
+                crate::ui::clip_dialog::ClipDialog::show(
+                    ui,
+                    state,
+                    &mut self.show_clip_dialog,
+                    current_file,
+                    range,
+                    &mut self.preferences_state,
+                    &mut self.clip_export,
+                );
+            }
+        }
 
         if !self.actions.is_empty() {
             self.run_actions(&ctx);
@@ -1259,11 +1629,15 @@ impl eframe::App for AirMediaApp {
         }
 
         let video_on_screen = self.view == View::Player
-            && self.player.media_info.as_ref().is_some_and(|m| m.primary_video_stream().is_some());
+            && self
+                .player
+                .media_info
+                .as_ref()
+                .is_some_and(|m| m.primary_video_stream().is_some());
         if self.player.is_playing && video_on_screen {
             ctx.request_repaint();
-        } else if self.player.is_playing {
-            // Music and the mini player don't need every display refresh.
+        } else if self.player.is_playing || self.clip_export.is_some() {
+            // Music, the mini player, and background clip export don't need every display refresh.
             ctx.request_repaint_after(Duration::from_millis(33));
         } else if self.toast.is_some() || self.codec_state.downloader.is_busy() {
             ctx.request_repaint();
@@ -1282,7 +1656,10 @@ impl Drop for AirMediaApp {
 
 /// What a private session starts with: no history or playlist, only the effect settings.
 fn incognito_session(saved: SessionState) -> SessionState {
-    SessionState { equalizer: saved.equalizer, ..Default::default() }
+    SessionState {
+        equalizer: saved.equalizer,
+        ..Default::default()
+    }
 }
 
 fn format_clock(secs: f64) -> String {
@@ -1295,12 +1672,11 @@ fn format_clock(secs: f64) -> String {
     }
 }
 
-
 fn draw_toast_hud(ui: &mut Ui, center: Pos2, text: &str, alpha: f32) {
-    let mut painter = ui
-        .painter()
-        .clone()
-        .with_layer_id(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("toast")));
+    let mut painter = ui.painter().clone().with_layer_id(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::unique("toast"),
+    ));
     painter.multiply_opacity(alpha);
     let galley = painter.layout_no_wrap(text.to_owned(), Theme::font_semibold(13.5), Theme::TEXT);
     let rect = Rect::from_center_size(center, galley.size() + Vec2::new(32.0, 16.0));
