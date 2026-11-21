@@ -1,8 +1,11 @@
 pub mod audio;
+pub mod clip_export;
 pub mod decoder;
 pub mod dependency;
 pub mod probe;
 pub mod subtitle;
+
+pub use clip_export::{show_in_folder, ClipExportJob, ClipExportPoll};
 
 use audio::AudioEngine;
 use decoder::{HwAccelMode, VideoDecoder, VideoFrame};
