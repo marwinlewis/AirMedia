@@ -22,6 +22,8 @@ pub struct ClipExportJob {
     pub output_path: PathBuf,
     child: Arc<Mutex<Option<Child>>>,
     cancelled: Arc<AtomicBool>,
+    /// Set once ffmpeg has exited and the worker has decided the outcome.
+    finished: Arc<AtomicBool>,
     progress: Arc<Mutex<f32>>,
     result: Arc<Mutex<Option<Result<PathBuf, String>>>>,
     worker: Option<JoinHandle<()>>,
@@ -47,11 +49,13 @@ impl ClipExportJob {
 
         let child_arc = Arc::new(Mutex::new(Some(child)));
         let cancelled = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(Mutex::new(0.0f32));
         let result = Arc::new(Mutex::new(None));
 
         let child_clone = Arc::clone(&child_arc);
         let cancelled_clone = Arc::clone(&cancelled);
+        let finished_clone = Arc::clone(&finished);
         let progress_clone = Arc::clone(&progress);
         let result_clone = Arc::clone(&result);
         let output_path = output.to_path_buf();
@@ -91,17 +95,26 @@ impl ClipExportJob {
                 }
             }
 
-            // Wait for ffmpeg child process to exit
-            let wait_status = {
-                let mut guard = child_clone.lock().unwrap();
-                if let Some(ref mut c) = *guard {
-                    c.wait()
-                } else {
-                    return;
+            // Wait for ffmpeg to exit. Poll with try_wait and release the lock between polls so
+            // cancel() can always take it to kill the process.
+            let wait_status = loop {
+                let polled = match child_clone.lock() {
+                    Ok(mut guard) => match guard.as_mut() {
+                        Some(c) => c.try_wait(),
+                        None => return,
+                    },
+                    Err(_) => return,
+                };
+                match polled {
+                    Ok(Some(status)) => break Ok(status),
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(30)),
+                    Err(e) => break Err(e),
                 }
             };
 
             let err_buf = err_handle.join().unwrap_or_default();
+            // From here on cancel() must not touch the output: the worker owns the outcome.
+            finished_clone.store(true, Ordering::SeqCst);
             let is_cancelled = cancelled_clone.load(Ordering::SeqCst);
 
             if is_cancelled {
@@ -129,7 +142,11 @@ impl ClipExportJob {
                             .find(|l| !l.is_empty() && !l.starts_with("frame=") && !l.starts_with("fps="))
                             .unwrap_or("FFmpeg export failed");
                         if let Ok(mut res) = result_clone.lock() {
-                            *res = Some(Err(format!("FFmpeg failed ({status}): {summary}")));
+                            *res = Some(Err(if summary.contains("Encoder not found") || summary.contains("Unknown encoder") {
+                                "This ffmpeg build has no H.264 encoder (libx264). Use Fast mode, or install a full ffmpeg build.".to_string()
+                            } else {
+                                format!("FFmpeg failed ({status}): {summary}")
+                            }));
                         }
                     }
                     Err(e) => {
@@ -146,6 +163,7 @@ impl ClipExportJob {
             output_path,
             child: child_arc,
             cancelled,
+            finished,
             progress,
             result,
             worker: Some(worker),
@@ -176,15 +194,20 @@ impl ClipExportJob {
         }
     }
 
-    /// Cancels the export job, kills the child process, and removes partial files.
+    /// Cancels a running export: kills ffmpeg and removes the partial file. Does nothing once
+    /// the export has finished, so a completed clip is never deleted.
     pub fn cancel(&mut self) {
+        if self.finished.load(Ordering::SeqCst) {
+            return;
+        }
         if !self.cancelled.swap(true, Ordering::SeqCst) {
             if let Ok(mut guard) = self.child.lock() {
-                if let Some(ref mut c) = *guard {
+                if let Some(c) = guard.as_mut() {
                     let _ = c.kill();
                 }
             }
-            let _ = std::fs::remove_file(&self.output_path);
+            // The worker removes the partial file after ffmpeg exits (it can't be deleted on
+            // Windows while ffmpeg still has it open).
         }
     }
 

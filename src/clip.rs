@@ -118,6 +118,53 @@ impl ClipExportMode {
     }
 }
 
+/// Encoder arguments for a Precise (re-encoded) export: H.264 + AAC, the most widely
+/// available encoders in ffmpeg builds and accepted by every container in
+/// [`PRECISE_EXTENSIONS`]. (VP9 for WebM is left out: many builds lack libvpx.)
+pub const PRECISE_VIDEO_ARGS: [&str; 8] = ["-c:v", "libx264", "-crf", "18", "-preset", "veryfast", "-pix_fmt", "yuv420p"];
+pub const PRECISE_AUDIO_ARGS: [&str; 4] = ["-c:a", "aac", "-b:a", "192k"];
+
+/// Containers a Precise export can write. Anything else (e.g. `.webm`, `.ogv`, `.wmv`) is
+/// exported with an `.mp4` extension instead.
+pub const PRECISE_EXTENSIONS: [&str; 7] = ["mp4", "m4v", "mkv", "mov", "ts", "flv", "avi"];
+
+/// Checks a user-entered clip filename and returns the full output path.
+///
+/// Rejects empty names, names containing path separators or `..`, names without an extension,
+/// and any path that resolves to the source file itself (exporting over the source would
+/// destroy it).
+pub fn validate_clip_output(input: &Path, folder: &Path, filename: &str) -> Result<std::path::PathBuf, String> {
+    let name = filename.trim();
+    if name.is_empty() {
+        return Err("Enter a file name".to_string());
+    }
+    if name.contains(['/', '\\']) || name == "." || name == ".." || name.contains("..") {
+        return Err("The file name can't contain folders or \"..\"".to_string());
+    }
+    #[cfg(windows)]
+    if name.contains([':', '*', '?', '"', '<', '>', '|']) {
+        return Err("The file name contains characters Windows doesn't allow".to_string());
+    }
+    if Path::new(name).extension().is_none() {
+        return Err("Add a file extension such as .mp4".to_string());
+    }
+    let out = folder.join(name);
+    let abs = |p: &Path| {
+        std::fs::canonicalize(p)
+            .or_else(|_| std::path::absolute(p))
+            .unwrap_or_else(|_| p.to_path_buf())
+    };
+    let same = if cfg!(windows) {
+        abs(&out).to_string_lossy().to_lowercase() == abs(input).to_string_lossy().to_lowercase()
+    } else {
+        abs(&out) == abs(input)
+    };
+    if same {
+        return Err("Choose a different name: this would overwrite the video you're cutting from".to_string());
+    }
+    Ok(out)
+}
+
 /// Pure function building ffmpeg CLI arguments for clip export.
 pub fn build_clip_args(
     input: &Path,
@@ -154,21 +201,22 @@ pub fn build_clip_args(
             args.push("make_zero".to_string());
         }
         ClipExportMode::Precise => {
-            // Precise: <ffmpeg_input_args(input)> -ss <start> -t <dur> -c:v libx264 -crf 18 -preset veryfast -c:a aac
-            args.extend(crate::media::ffmpeg_input_args(input));
+            // Input seeking (-ss before -i) is frame-accurate when re-encoding and avoids
+            // decoding everything before the clip.
             args.push("-ss".to_string());
             args.push(format!("{:.3}", range.start));
+            args.extend(crate::media::ffmpeg_input_args(input));
             args.push("-t".to_string());
             args.push(format!("{:.3}", dur));
-            args.push("-c:v".to_string());
-            args.push("libx264".to_string());
-            args.push("-crf".to_string());
-            args.push("18".to_string());
-            args.push("-preset".to_string());
-            args.push("veryfast".to_string());
+            args.push("-map".to_string());
+            args.push("0:v?".to_string());
             if include_audio {
-                args.push("-c:a".to_string());
-                args.push("aac".to_string());
+                args.push("-map".to_string());
+                args.push("0:a?".to_string());
+            }
+            args.extend(PRECISE_VIDEO_ARGS.iter().map(|s| s.to_string()));
+            if include_audio {
+                args.extend(PRECISE_AUDIO_ARGS.iter().map(|s| s.to_string()));
             } else {
                 args.push("-an".to_string());
             }

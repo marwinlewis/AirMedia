@@ -797,7 +797,7 @@ fn test_build_clip_args_fast_and_precise() {
     let args_precise = build_clip_args(input, output, range, ClipExportMode::Precise, true);
     let ss_idx = args_precise.iter().position(|a| a == "-ss").expect("-ss present");
     let i_idx = args_precise.iter().position(|a| a == "-i").expect("-i present");
-    assert!(i_idx < ss_idx, "Precise mode decodes after input (seeks after -i)");
+    assert!(ss_idx < i_idx, "Precise mode seeks on the input (accurate when re-encoding, and fast)");
     assert!(args_precise.contains(&"libx264".to_string()));
     assert!(args_precise.contains(&"aac".to_string()));
     assert!(args_precise.contains(&"-progress".to_string()));
@@ -808,4 +808,75 @@ fn test_build_clip_args_fast_and_precise() {
     let args_precise_no_audio = build_clip_args(input, output, range, ClipExportMode::Precise, false);
     assert!(args_precise_no_audio.contains(&"-an".to_string()), "-an must be present in precise mode when audio is off");
     assert!(!args_precise_no_audio.contains(&"aac".to_string()), "aac encoder should not be present when audio is off");
+}
+
+#[test]
+fn test_precise_uses_h264_aac() {
+    use airmedia::clip::{build_clip_args, ClipExportMode, ClipRange, PRECISE_EXTENSIONS};
+    let range = ClipRange::new(1.0, 3.0, 60.0);
+    let mkv = build_clip_args(Path::new("in.mkv"), Path::new("out.mkv"), range, ClipExportMode::Precise, true);
+    assert!(mkv.contains(&"libx264".to_string()) && mkv.contains(&"aac".to_string()));
+    assert!(!PRECISE_EXTENSIONS.contains(&"webm"), "WebM can't hold H.264, so Precise must not write it");
+}
+
+#[test]
+fn test_validate_clip_output() {
+    use airmedia::clip::validate_clip_output;
+    let dir = temp_dir("clip_validate");
+    let src = dir.join("movie.mp4");
+    std::fs::write(&src, b"x").unwrap();
+
+    assert_eq!(validate_clip_output(&src, &dir, "clip.mp4").unwrap(), dir.join("clip.mp4"));
+    assert!(validate_clip_output(&src, &dir, "  ").is_err(), "empty name");
+    assert!(validate_clip_output(&src, &dir, "../clip.mp4").is_err(), "parent traversal");
+    assert!(validate_clip_output(&src, &dir, "sub/clip.mp4").is_err(), "forward slash");
+    assert!(validate_clip_output(&src, &dir, r"sub\clip.mp4").is_err(), "backslash");
+    assert!(validate_clip_output(&src, &dir, "clip").is_err(), "no extension");
+    assert!(validate_clip_output(&src, &dir, "movie.mp4").is_err(), "would overwrite the source");
+    #[cfg(windows)]
+    assert!(validate_clip_output(&src, &dir, "MOVIE.MP4").is_err(), "case-insensitive on Windows");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Runs a real export when ffmpeg is installed: a finished clip must survive the job being
+/// dropped, and a cancelled export must leave no partial file.
+#[test]
+fn test_clip_export_job_keeps_finished_file_and_cleans_cancelled() {
+    use airmedia::clip::{ClipExportMode, ClipRange};
+    use airmedia::media::clip_export::{ClipExportJob, ClipExportPoll};
+    use std::time::{Duration, Instant};
+
+    if !airmedia::media::dependency::check_dependencies().is_ready() {
+        eprintln!("ffmpeg not found; skipping export job test");
+        return;
+    }
+    let input = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_media.mp4");
+    let dir = temp_dir("clip_export_job");
+    let wait = |job: &mut ClipExportJob| {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            match job.poll() {
+                ClipExportPoll::Running { .. } if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(30)),
+                other => return other,
+            }
+        }
+    };
+
+    for mode in [ClipExportMode::Fast, ClipExportMode::Precise] {
+        let out = dir.join(format!("clip_{mode:?}.mp4"));
+        let mut job = ClipExportJob::start(&input, &out, ClipRange { start: 1.0, end: 3.0 }, mode, true).unwrap();
+        let res = wait(&mut job);
+        assert!(matches!(res, ClipExportPoll::Success(_)), "{mode:?} export failed: {res:?}");
+        drop(job);
+        assert!(out.exists(), "{mode:?}: finished clip must not be deleted when the job is dropped");
+    }
+
+    let out = dir.join("clip_cancelled.mp4");
+    let mut job = ClipExportJob::start(&input, &out, ClipRange { start: 0.0, end: 4.0 }, ClipExportMode::Precise, true).unwrap();
+    job.cancel();
+    assert!(matches!(job.poll(), ClipExportPoll::Cancelled));
+    drop(job); // joins the worker, which removes the partial file
+    assert!(!out.exists(), "cancelled export must not leave a partial file");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

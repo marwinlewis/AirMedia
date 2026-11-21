@@ -647,8 +647,8 @@ impl ControlsView {
                 .min_size(Vec2::new(0.0, 26.0)),
             )
             .on_hover_text("Set clip end at current playhead position (Shift+])");
-        if end_btn.clicked() {
-            range.set_end(cur_time, dur);
+        if end_btn.clicked() && !range.set_end(cur_time, dur) {
+            *cx.toast_msg = Some("Clip end must be after the start".to_string());
         }
 
         // · duration
@@ -756,14 +756,21 @@ impl ControlsView {
                 let start_x = x_at(range.start);
                 let end_x = x_at(range.end);
 
-                let start_hit = Rect::from_center_size(
+                let mut start_hit = Rect::from_center_size(
                     Pos2::new(start_x, rail.center().y),
                     Vec2::new(14.0, 24.0),
                 );
-                let end_hit = Rect::from_center_size(
+                let mut end_hit = Rect::from_center_size(
                     Pos2::new(end_x, rail.center().y),
                     Vec2::new(14.0, 24.0),
                 );
+                // On a short clip the hit areas overlap; split them at the midpoint so the
+                // start handle stays grabbable from its left half.
+                if start_hit.max.x > end_hit.min.x {
+                    let mid = (start_x + end_x) / 2.0;
+                    start_hit.max.x = mid;
+                    end_hit.min.x = mid;
+                }
 
                 let start_resp = ui.interact(
                     start_hit,
@@ -798,6 +805,14 @@ impl ControlsView {
                         let f = ((p.x - rail.min.x) / rail.width()).clamp(0.0, 1.0);
                         range.set_end(f as f64 * total, total);
                     }
+                }
+
+                // Show the frame at a handle once it is released, so the cut point is visible.
+                // (Seeking on every drag frame would restart the decoder continuously.)
+                if start_resp.drag_stopped() || start_resp.clicked() {
+                    player.seek(range.start);
+                } else if end_resp.drag_stopped() || end_resp.clicked() {
+                    player.seek(range.end);
                 }
             }
         }

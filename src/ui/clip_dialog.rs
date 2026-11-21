@@ -16,6 +16,8 @@ pub struct ClipDialogState {
     pub include_audio: bool,
     pub confirming_overwrite: bool,
     pub error_msg: Option<String>,
+    /// Set when the last export finished; the dialog then shows where the clip went.
+    pub saved_path: Option<PathBuf>,
 }
 
 impl ClipDialogState {
@@ -28,6 +30,7 @@ impl ClipDialogState {
             .or_else(|| current_file.parent().map(|p| p.to_path_buf()))
             .unwrap_or_else(crate::media::default_pictures_dir);
         let mode = prefs.last_clip_mode;
+        let filename = if mode == ClipExportMode::Precise { precise_filename(&filename) } else { filename };
         Self {
             filename,
             folder,
@@ -35,6 +38,7 @@ impl ClipDialogState {
             include_audio: true,
             confirming_overwrite: false,
             error_msg: None,
+            saved_path: None,
         }
     }
 }
@@ -52,7 +56,30 @@ impl ClipDialog {
         clip_export: &mut Option<ClipExportJob>,
     ) {
         show_dialog(ui, "Export Clip", is_open, 460.0, |ui, close| {
-            if let Some(job) = clip_export.as_mut() {
+            if let Some(saved) = state.saved_path.clone() {
+                ui.label(
+                    RichText::new("Clip saved")
+                        .font(Theme::font_semibold(14.5))
+                        .color(Theme::TEXT),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(shorten_path_label(&saved.to_string_lossy(), 56))
+                        .font(Theme::font(12.0))
+                        .color(Theme::TEXT_MUTED),
+                )
+                .on_hover_text(saved.to_string_lossy());
+                ui.add_space(16.0);
+                footer_row(ui, |ui| {
+                    if ui.add(primary_button("Done")).clicked() {
+                        *close = true;
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    if ui.add(secondary_button("Show in folder")).clicked() {
+                        crate::media::clip_export::show_in_folder(&saved);
+                    }
+                });
+            } else if let Some(job) = clip_export.as_mut() {
                 // Export is running in background
                 ui.label(
                     RichText::new("Exporting video clip\u{2026}")
@@ -126,6 +153,10 @@ impl ClipDialog {
                             for m in ClipExportMode::ALL {
                                 if ui.selectable_label(state.mode == m, m.name()).clicked() {
                                     state.mode = m;
+                                    if m == ClipExportMode::Precise {
+                                        state.filename = precise_filename(&state.filename);
+                                    }
+                                    state.error_msg = None;
                                     prefs.last_clip_mode = m;
                                     prefs.save();
                                 }
@@ -186,11 +217,17 @@ impl ClipDialog {
                             .add_enabled(can_export, primary_button("Export"))
                             .clicked()
                         {
-                            let target_path = state.folder.join(&state.filename);
-                            if target_path.exists() {
-                                state.confirming_overwrite = true;
-                            } else {
-                                trigger_start = true;
+                            match current_file.map(|src| check_output(src, state)) {
+                                Some(Ok(target_path)) => {
+                                    state.error_msg = None;
+                                    if target_path.exists() {
+                                        state.confirming_overwrite = true;
+                                    } else {
+                                        trigger_start = true;
+                                    }
+                                }
+                                Some(Err(e)) => state.error_msg = Some(e),
+                                None => {}
                             }
                         }
                         if ui.add(secondary_button("Cancel")).clicked() {
@@ -200,8 +237,11 @@ impl ClipDialog {
                 }
 
                 if trigger_start {
-                    if let Some(src) = current_file {
-                        let target_path = state.folder.join(&state.filename);
+                    let checked = current_file.map(|src| (src, check_output(src, state)));
+                    if let Some((_, Err(e))) = &checked {
+                        state.error_msg = Some(e.clone());
+                    }
+                    if let Some((src, Ok(target_path))) = checked {
                         prefs.last_clip_folder = Some(state.folder.clone());
                         prefs.last_clip_mode = state.mode;
                         prefs.save();
@@ -233,5 +273,36 @@ impl ClipDialog {
             }
             state.confirming_overwrite = false;
         }
+    }
+}
+
+/// Validates the dialog's filename for the current mode and returns the output path.
+fn check_output(src: &Path, state: &ClipDialogState) -> Result<PathBuf, String> {
+    let out = crate::clip::validate_clip_output(src, &state.folder, &state.filename)?;
+    if state.mode == ClipExportMode::Precise {
+        let ext = out
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        if !crate::clip::PRECISE_EXTENSIONS.contains(&ext.as_str()) {
+            return Err(format!("Precise mode can't write .{ext} files; use .mp4 or .mkv"));
+        }
+    }
+    Ok(out)
+}
+
+/// Swaps an extension Precise mode can't write (e.g. `.ogv`, `.wmv`) for `.mp4`.
+fn precise_filename(name: &str) -> String {
+    let path = Path::new(name);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if crate::clip::PRECISE_EXTENSIONS.contains(&ext.as_str()) {
+        name.to_string()
+    } else {
+        path.with_extension("mp4").to_string_lossy().into_owned()
     }
 }

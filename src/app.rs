@@ -819,7 +819,10 @@ impl AirMediaApp {
                 self.toggle_clip_mode();
             }
         }
-        if has_media && shift && !ctrl && input.key_pressed(Key::OpenBracket) && self.clip_mode {
+        // With Shift held most layouts report `{` / `}` rather than `[` / `]`, so accept both.
+        let clip_start_key = input.key_pressed(Key::OpenCurlyBracket) || (shift && input.key_pressed(Key::OpenBracket));
+        let clip_end_key = input.key_pressed(Key::CloseCurlyBracket) || (shift && input.key_pressed(Key::CloseBracket));
+        if has_media && !ctrl && clip_start_key && self.clip_mode {
             let cur = self.player.current_time_secs();
             let dur = self.player.duration_secs;
             let msg = if let Some(ref mut range) = self.clip_range {
@@ -835,7 +838,7 @@ impl AirMediaApp {
                 self.set_toast(m);
             }
         }
-        if has_media && shift && !ctrl && input.key_pressed(Key::CloseBracket) && self.clip_mode {
+        if has_media && !ctrl && clip_end_key && self.clip_mode {
             let cur = self.player.current_time_secs();
             let dur = self.player.duration_secs;
             let msg = if let Some(ref mut range) = self.clip_range {
@@ -1386,10 +1389,11 @@ impl eframe::App for AirMediaApp {
             match job.poll() {
                 crate::media::clip_export::ClipExportPoll::Running { .. } => {}
                 crate::media::clip_export::ClipExportPoll::Success(path) => {
-                    self.set_toast(format!("Clip saved: {}", path.display()));
-                    crate::media::clip_export::show_in_folder(&path);
+                    self.set_toast("Clip saved");
+                    if let Some(ref mut state) = self.clip_dialog_state {
+                        state.saved_path = Some(path);
+                    }
                     self.clip_export = None;
-                    self.show_clip_dialog = false;
                 }
                 crate::media::clip_export::ClipExportPoll::Failed(err) => {
                     self.set_error_toast(format!("Clip export failed: {err}"));
