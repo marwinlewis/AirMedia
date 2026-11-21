@@ -175,6 +175,18 @@ impl AirMediaApp {
         self.toast = Some((msg.into(), Instant::now(), 4.0));
     }
 
+    pub fn take_screenshot(&mut self) {
+        if self.player.current_file.is_some() {
+            match self.player.take_screenshot(
+                &self.preferences_state.screenshot_dir,
+                self.preferences_state.screenshot_format,
+            ) {
+                Ok(path) => self.set_toast(format!("Screenshot saved: {}", path.display())),
+                Err(e) => self.set_toast(format!("Screenshot failed: {e}")),
+            }
+        }
+    }
+
     /// Expands files, folders, playlists and URLs, appends the media to the playlist and
     /// optionally starts the first new item. Subtitle files attach to the current media.
     pub fn open_paths(&mut self, inputs: Vec<PathBuf>, play: bool) {
@@ -593,13 +605,7 @@ impl AirMediaApp {
 
         // Shift+S: Take Screenshot
         if has_media && input.modifiers.shift && input.key_pressed(Key::S) {
-            match self.player.take_screenshot(
-                &self.preferences_state.screenshot_dir,
-                self.preferences_state.screenshot_format,
-            ) {
-                Ok(path) => self.set_toast(format!("Screenshot saved: {}", path.display())),
-                Err(e) => self.set_toast(format!("Screenshot failed: {e}")),
-            }
+            self.take_screenshot();
         }
 
         // M: Mute toggle
@@ -823,6 +829,7 @@ impl AirMediaApp {
         let mut open_jump = false;
         let mut stop_request = false;
         let mut open_incognito = false;
+        let mut take_screenshot = false;
         let mut always_on_top = self.preferences_state.always_on_top;
         Popup::menu(button)
             .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
@@ -853,12 +860,16 @@ impl AirMediaApp {
                         prefs: &self.preferences_state,
                         incognito: self.incognito,
                         open_incognito: &mut open_incognito,
+                        take_screenshot: &mut take_screenshot,
                     },
                 );
             });
         self.preferences_state.always_on_top = always_on_top;
         if let Some(t) = toast {
             self.set_toast(t);
+        }
+        if take_screenshot {
+            self.take_screenshot();
         }
         if let Some(req) = open_request {
             self.open_paths(req.paths, req.play);
@@ -1025,8 +1036,8 @@ impl AirMediaApp {
         let up_next = self.playlist.peek_next().map(|i| display_title(&i.path));
         let has_queue = self.playlist.items.len() > 1;
         let mut toast = None;
-        let (mut toggle_fs, mut cycle_ab, mut open_jump, mut go_back, mut play_next, mut play_prev) =
-            (false, false, false, false, false, false);
+        let (mut toggle_fs, mut cycle_ab, mut open_jump, mut go_back, mut play_next, mut play_prev, mut take_screenshot) =
+            (false, false, false, false, false, false, false);
         let output = self.controls.show(
             ui,
             rect,
@@ -1056,6 +1067,7 @@ impl AirMediaApp {
                 repeat: &mut self.playlist.repeat_mode,
                 has_queue,
                 audio_only,
+                take_screenshot: &mut take_screenshot,
             },
         );
 
@@ -1065,6 +1077,9 @@ impl AirMediaApp {
         }
         if let Some(t) = toast {
             self.set_toast(t);
+        }
+        if take_screenshot {
+            self.take_screenshot();
         }
         if toggle_fs {
             self.toggle_fullscreen(ctx);

@@ -57,6 +57,7 @@ pub struct ControlsCtx<'a> {
     pub repeat: &'a mut RepeatMode,
     pub has_queue: bool,
     pub audio_only: bool,
+    pub take_screenshot: &'a mut bool,
 }
 
 pub struct ControlsOutput {
@@ -152,12 +153,30 @@ impl ControlsView {
         let mut left = layer.new_child(UiBuilder::new().id_salt("player_left").max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
         left.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
 
+        if !player.is_playing && !cx.audio_only {
+            if icon_button_big(&mut left, Icon::FramePrev, 34.0)
+                .on_hover_text("Previous frame (,)")
+                .clicked()
+            {
+                player.step_frame(false);
+            }
+        }
+
         let play_icon = if player.is_playing { Icon::Pause } else { Icon::Play };
         if icon_button_big(&mut left, play_icon, 50.0)
             .on_hover_text(if player.is_playing { "Pause (Space)" } else { "Play (Space)" })
             .clicked()
         {
             player.toggle_play();
+        }
+
+        if !player.is_playing && !cx.audio_only {
+            if icon_button_big(&mut left, Icon::FrameNext, 34.0)
+                .on_hover_text("Next frame (.)")
+                .clicked()
+            {
+                player.step_frame(true);
+            }
         }
         if medium {
             if icon_button_big(&mut left, Icon::Back10, 46.0).on_hover_text("Back 10 seconds").clicked() {
@@ -220,7 +239,7 @@ impl ControlsView {
 
         let settings_resp = icon_button_big(&mut right, Icon::Settings, 46.0).on_hover_text("Settings");
         popup_above(&settings_resp).width(300.0).show(|ui| {
-            settings_menu(ui, player, cx.aspect_mode, cx.show_info, cx.show_preferences, cx.show_equalizer, cx.prefs, cx.toast_msg, cx.ab_loop, cx.cycle_ab_loop, cx.open_jump);
+            settings_menu(ui, player, cx.aspect_mode, cx.show_info, cx.show_preferences, cx.show_equalizer, cx.ab_loop, cx.cycle_ab_loop, cx.open_jump, cx.take_screenshot);
         });
 
         let tracks_resp = icon_button_big(&mut right, Icon::Subtitles, 46.0).on_hover_text("Audio & subtitles");
@@ -243,6 +262,15 @@ impl ControlsView {
                     }
                 }
             });
+        }
+
+        if medium && !cx.audio_only {
+            if icon_button_big(&mut right, Icon::Camera, 46.0)
+                .on_hover_text("Take screenshot (Shift+S)")
+                .clicked()
+            {
+                *cx.take_screenshot = true;
+            }
         }
 
         let playlist_resp = icon_button_ex_big(&mut right, Icon::Playlist, 46.0, *cx.show_playlist).on_hover_text("Playlist (L)");
@@ -558,11 +586,10 @@ fn settings_menu(
     show_info: &mut bool,
     show_preferences: &mut bool,
     show_equalizer: &mut bool,
-    prefs: &mut PreferencesState,
-    toast_msg: &mut Option<String>,
     ab: crate::ab_loop::AbLoop,
     cycle_ab_loop: &mut bool,
     open_jump: &mut bool,
+    take_screenshot: &mut bool,
 ) {
     ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
 
@@ -605,10 +632,7 @@ fn settings_menu(
         ui.close();
     }
     if menu_row(ui, Icon::Camera, "Take screenshot", "Shift+S").clicked() {
-        match player.take_screenshot(&prefs.screenshot_dir, prefs.screenshot_format) {
-            Ok(path) => *toast_msg = Some(format!("Screenshot saved: {}", path.display())),
-            Err(e) => *toast_msg = Some(format!("Screenshot failed: {e}")),
-        }
+        *take_screenshot = true;
         ui.close();
     }
     if menu_row(ui, Icon::ChevronRight, "Jump to time\u{2026}", "Ctrl+G").clicked() {
