@@ -54,7 +54,11 @@ fn airmedia_test_parse_srt(content: &str) -> Vec<Cue> {
     let mut cues = Vec::new();
 
     for block in blocks {
-        let lines: Vec<&str> = block.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        let lines: Vec<&str> = block
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect();
         if lines.is_empty() {
             continue;
         }
@@ -74,7 +78,11 @@ fn airmedia_test_parse_srt(content: &str) -> Vec<Cue> {
             if let (Some(s), Some(e)) = (start, end) {
                 let text = lines[text_start_idx..].join("\n");
                 let clean = strip_tags(&text);
-                cues.push(Cue { start_ms: s, end_ms: e, text: clean });
+                cues.push(Cue {
+                    start_ms: s,
+                    end_ms: e,
+                    text: clean,
+                });
             }
         }
     }
@@ -87,7 +95,11 @@ fn airmedia_test_parse_vtt(content: &str) -> Vec<Cue> {
     let mut cues = Vec::new();
 
     for block in blocks {
-        let lines: Vec<&str> = block.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        let lines: Vec<&str> = block
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect();
         if lines.is_empty() || lines[0].starts_with("WEBVTT") {
             continue;
         }
@@ -107,7 +119,11 @@ fn airmedia_test_parse_vtt(content: &str) -> Vec<Cue> {
             if let (Some(s), Some(e)) = (start, end) {
                 let text = lines[text_start_idx..].join("\n");
                 let clean = strip_tags(&text);
-                cues.push(Cue { start_ms: s, end_ms: e, text: clean });
+                cues.push(Cue {
+                    start_ms: s,
+                    end_ms: e,
+                    text: clean,
+                });
             }
         }
     }
@@ -174,13 +190,14 @@ fn test_media_file_probe() {
 
     let status = check_dependencies();
     if status.ffprobe.is_found() {
-        let info = MediaInfo::probe(&test_file).expect("MediaInfo probe should succeed when ffprobe is found");
+        let info = MediaInfo::probe(&test_file)
+            .expect("MediaInfo probe should succeed when ffprobe is found");
         let dims = info.video_dimensions();
         assert_eq!(dims, Some((1280, 720)));
         assert!(info.duration_seconds() > 0.0);
-        let has_h264 = info.primary_video_stream().map_or(false, |s| {
-            s.codec_name.as_deref() == Some("h264")
-        });
+        let has_h264 = info
+            .primary_video_stream()
+            .map_or(false, |s| s.codec_name.as_deref() == Some("h264"));
         assert!(has_h264, "Video codec should be h264");
     } else {
         // When ffprobe is missing, MediaInfo::probe should gracefully return an informative error
@@ -251,16 +268,45 @@ fn test_dependency_detection() {
 fn test_image_formats_save() {
     let width = 2;
     let height = 2;
-    let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
-    let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|c| [c[0], c[1], c[2]]).collect();
+    let rgba = vec![
+        255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+    ];
+    let rgb: Vec<u8> = rgba
+        .chunks_exact(4)
+        .flat_map(|c| [c[0], c[1], c[2]])
+        .collect();
     let temp_dir = std::env::temp_dir();
     let jpg_path = temp_dir.join("test_airmedia_shot.jpg");
     let png_path = temp_dir.join("test_airmedia_shot.png");
     let bmp_path = temp_dir.join("test_airmedia_shot.bmp");
 
-    image::save_buffer_with_format(&jpg_path, &rgb, width, height, image::ExtendedColorType::Rgb8, image::ImageFormat::Jpeg).unwrap();
-    image::save_buffer_with_format(&png_path, &rgba, width, height, image::ExtendedColorType::Rgba8, image::ImageFormat::Png).unwrap();
-    image::save_buffer_with_format(&bmp_path, &rgb, width, height, image::ExtendedColorType::Rgb8, image::ImageFormat::Bmp).unwrap();
+    image::save_buffer_with_format(
+        &jpg_path,
+        &rgb,
+        width,
+        height,
+        image::ExtendedColorType::Rgb8,
+        image::ImageFormat::Jpeg,
+    )
+    .unwrap();
+    image::save_buffer_with_format(
+        &png_path,
+        &rgba,
+        width,
+        height,
+        image::ExtendedColorType::Rgba8,
+        image::ImageFormat::Png,
+    )
+    .unwrap();
+    image::save_buffer_with_format(
+        &bmp_path,
+        &rgb,
+        width,
+        height,
+        image::ExtendedColorType::Rgb8,
+        image::ImageFormat::Bmp,
+    )
+    .unwrap();
 
     assert!(jpg_path.exists());
     assert!(png_path.exists());
@@ -281,7 +327,8 @@ fn test_preferences_defaults_and_serialization() {
     assert_eq!(default_prefs.screenshot_dir, default_pictures_dir());
 
     let json = serde_json::to_string_pretty(&default_prefs).expect("Serialize preferences");
-    let deserialized: PreferencesState = serde_json::from_str(&json).expect("Deserialize preferences");
+    let deserialized: PreferencesState =
+        serde_json::from_str(&json).expect("Deserialize preferences");
     assert_eq!(deserialized.screenshot_format, ScreenshotFormat::Jpg);
     assert_eq!(deserialized.screenshot_dir, default_pictures_dir());
 }
@@ -301,7 +348,10 @@ fn test_media_player_step_frame_and_screenshot() {
         // Codecs not installed on runner: verify that load_file fails gracefully rather than crashing
         let mut player = MediaPlayer::new();
         let load_res = player.load_file(&test_file);
-        assert!(load_res.is_err(), "load_file should fail gracefully when codecs are not installed");
+        assert!(
+            load_res.is_err(),
+            "load_file should fail gracefully when codecs are not installed"
+        );
         let err = load_res.unwrap_err();
         assert!(
             err.contains("ffprobe") || err.contains("installed"),
@@ -316,36 +366,204 @@ fn test_media_player_step_frame_and_screenshot() {
     assert!(load_res.is_ok(), "Should load test_media.mp4");
 
     let start_wait = std::time::Instant::now();
-    while player.get_latest_video_frame().is_none() && start_wait.elapsed() < std::time::Duration::from_secs(10) {
+    while player.get_latest_video_frame().is_none()
+        && start_wait.elapsed() < std::time::Duration::from_secs(10)
+    {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert!(player.get_latest_video_frame().is_some(), "Video frame should be ready within 10s");
+    assert!(
+        player.get_latest_video_frame().is_some(),
+        "Video frame should be ready within 10s"
+    );
 
     player.pause();
     assert!(!player.is_playing);
 
     let temp_dir = std::env::temp_dir().join("airmedia_test_shots");
     let shot1 = player.take_screenshot(&temp_dir, ScreenshotFormat::Jpg);
-    assert!(shot1.is_ok(), "Screenshot 1 should succeed: {:?}", shot1.err());
+    assert!(
+        shot1.is_ok(),
+        "Screenshot 1 should succeed: {:?}",
+        shot1.err()
+    );
     let path1 = shot1.unwrap();
-    assert!(path1.exists(), "Screenshot file should exist: {}", path1.display());
+    assert!(
+        path1.exists(),
+        "Screenshot file should exist: {}",
+        path1.display()
+    );
     assert_eq!(path1.extension().and_then(|e| e.to_str()), Some("jpg"));
 
     let time_before = player.current_time_secs();
     player.step_frame(true);
     std::thread::sleep(std::time::Duration::from_millis(150));
     let time_after = player.current_time_secs();
-    assert!(time_after >= time_before, "Stepping frame forward should advance time");
+    assert!(
+        time_after >= time_before,
+        "Stepping frame forward should advance time"
+    );
 
     let shot2 = player.take_screenshot(&temp_dir, ScreenshotFormat::Png);
     assert!(shot2.is_ok(), "Screenshot 2 should succeed");
     let path2 = shot2.unwrap();
-    assert!(path2.exists(), "PNG screenshot should exist: {}", path2.display());
+    assert!(
+        path2.exists(),
+        "PNG screenshot should exist: {}",
+        path2.display()
+    );
     assert_eq!(path2.extension().and_then(|e| e.to_str()), Some("png"));
 
     player.stop();
 
     let _ = std::fs::remove_file(path1);
     let _ = std::fs::remove_file(path2);
+    let _ = std::fs::remove_dir(temp_dir);
+}
+
+#[test]
+fn test_clip_export_job_fast_and_precise_and_cancel() {
+    use airmedia::clip::{ClipExportMode, ClipRange};
+    use airmedia::media::check_dependencies;
+    use airmedia::media::clip_export::{ClipExportJob, ClipExportPoll};
+    use airmedia::media::probe::MediaInfo;
+    use std::path::PathBuf;
+
+    let test_file = PathBuf::from("test_media.mp4");
+    if !test_file.exists() {
+        return;
+    }
+
+    let status = check_dependencies();
+    if !status.is_ready() {
+        return;
+    }
+
+    let temp_dir = std::env::temp_dir().join("airmedia_clip_test");
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    // 1. Fast mode export
+    let fast_out = temp_dir.join("test_clip_fast.mp4");
+    let _ = std::fs::remove_file(&fast_out);
+    let range_fast = ClipRange {
+        start: 1.0,
+        end: 4.0,
+    };
+    let mut job_fast = ClipExportJob::start(
+        &test_file,
+        &fast_out,
+        range_fast,
+        ClipExportMode::Fast,
+        true,
+    )
+    .expect("Fast clip export should start");
+
+    let start = std::time::Instant::now();
+    let mut completed_fast = false;
+    while start.elapsed() < std::time::Duration::from_secs(15) {
+        match job_fast.poll() {
+            ClipExportPoll::Running { .. } => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            ClipExportPoll::Success(p) => {
+                assert_eq!(p, fast_out);
+                completed_fast = true;
+                break;
+            }
+            ClipExportPoll::Failed(err) => panic!("Fast clip export failed: {err}"),
+            ClipExportPoll::Cancelled => panic!("Fast clip export unexpectedly cancelled"),
+        }
+    }
+    assert!(
+        completed_fast,
+        "Fast clip export should complete within 15s"
+    );
+    assert!(fast_out.exists(), "Fast clip file should exist");
+    let info_fast = MediaInfo::probe(&fast_out).expect("Fast clip should probe successfully");
+    assert!(
+        (info_fast.duration_seconds() - 3.0).abs() < 2.5,
+        "Fast clip duration ({}) should be within nearest keyframe bounds (~3.0s)",
+        info_fast.duration_seconds()
+    );
+
+    // 2. Precise mode export (re-encoded, accurate within 1 frame)
+    let precise_out = temp_dir.join("test_clip_precise.mp4");
+    let _ = std::fs::remove_file(&precise_out);
+    let range_precise = ClipRange {
+        start: 2.0,
+        end: 5.0,
+    };
+    let mut job_precise = ClipExportJob::start(
+        &test_file,
+        &precise_out,
+        range_precise,
+        ClipExportMode::Precise,
+        true,
+    )
+    .expect("Precise clip export should start");
+
+    let start = std::time::Instant::now();
+    let mut completed_precise = false;
+    while start.elapsed() < std::time::Duration::from_secs(20) {
+        match job_precise.poll() {
+            ClipExportPoll::Running { .. } => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            ClipExportPoll::Success(p) => {
+                assert_eq!(p, precise_out);
+                completed_precise = true;
+                break;
+            }
+            ClipExportPoll::Failed(err) => panic!("Precise clip export failed: {err}"),
+            ClipExportPoll::Cancelled => panic!("Precise clip export unexpectedly cancelled"),
+        }
+    }
+    assert!(
+        completed_precise,
+        "Precise clip export should complete within 20s"
+    );
+    assert!(precise_out.exists(), "Precise clip file should exist");
+    let info_precise =
+        MediaInfo::probe(&precise_out).expect("Precise clip should probe successfully");
+    assert!(
+        (info_precise.duration_seconds() - 3.0).abs() < 0.1,
+        "Precise clip duration ({}) should be within 1 frame (0.1s) of 3.0s",
+        info_precise.duration_seconds()
+    );
+
+    // 3. Cancel export
+    let cancel_out = temp_dir.join("test_clip_cancel.mp4");
+    let _ = std::fs::remove_file(&cancel_out);
+    let range_cancel = ClipRange {
+        start: 0.0,
+        end: 8.0,
+    };
+    let mut job_cancel = ClipExportJob::start(
+        &test_file,
+        &cancel_out,
+        range_cancel,
+        ClipExportMode::Precise,
+        true,
+    )
+    .expect("Cancel test job should start");
+
+    // Immediately cancel
+    job_cancel.cancel();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let poll_res = job_cancel.poll();
+    assert!(
+        matches!(poll_res, ClipExportPoll::Cancelled),
+        "Poll after cancel should return Cancelled: {:?}",
+        poll_res
+    );
+    assert!(
+        !cancel_out.exists(),
+        "Partial file should be cleaned up on cancel: {}",
+        cancel_out.display()
+    );
+
+    // Cleanup
+    let _ = std::fs::remove_file(fast_out);
+    let _ = std::fs::remove_file(precise_out);
+    let _ = std::fs::remove_file(cancel_out);
     let _ = std::fs::remove_dir(temp_dir);
 }

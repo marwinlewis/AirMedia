@@ -11,7 +11,13 @@ pub enum Group {
 }
 
 impl Group {
-    pub const ALL: [Group; 5] = [Group::Playback, Group::Seeking, Group::AudioVideo, Group::Playlist, Group::Window];
+    pub const ALL: [Group; 5] = [
+        Group::Playback,
+        Group::Seeking,
+        Group::AudioVideo,
+        Group::Playlist,
+        Group::Window,
+    ];
 
     pub fn name(&self) -> &'static str {
         match self {
@@ -35,49 +41,123 @@ pub struct Shortcut {
 }
 
 const fn sc(keys: &'static str, action: &'static str, group: Group) -> Shortcut {
-    Shortcut { keys, action, group, hint: None }
+    Shortcut {
+        keys,
+        action,
+        group,
+        hint: None,
+    }
 }
 
-const fn hint(keys: &'static str, action: &'static str, group: Group, label: &'static str) -> Shortcut {
-    Shortcut { keys, action, group, hint: Some(label) }
+const fn hint(
+    keys: &'static str,
+    action: &'static str,
+    group: Group,
+    label: &'static str,
+) -> Shortcut {
+    Shortcut {
+        keys,
+        action,
+        group,
+        hint: Some(label),
+    }
 }
 
 pub const SHORTCUTS: &[Shortcut] = &[
     sc("Space", "Play / Pause", Group::Playback),
     sc("S", "Stop and return to the library", Group::Playback),
-    sc("N / P", "Next / Previous track in playlist", Group::Playback),
-    sc("Media keys", "Play/Pause, Stop, Next and Previous track", Group::Playback),
+    sc(
+        "N / P",
+        "Next / Previous track in playlist",
+        Group::Playback,
+    ),
+    sc(
+        "Media keys",
+        "Play/Pause, Stop, Next and Previous track",
+        Group::Playback,
+    ),
     sc(".", "Step 1 frame forward", Group::Playback),
     sc(",", "Step 1 frame backward", Group::Playback),
-    sc("[ / ]", "Decrease / Increase playback speed (0.25x steps)", Group::Playback),
-    sc("Backspace or =", "Reset playback speed to 1.0x", Group::Playback),
+    sc(
+        "[ / ]",
+        "Decrease / Increase playback speed (0.25x steps)",
+        Group::Playback,
+    ),
+    sc(
+        "Backspace or =",
+        "Reset playback speed to 1.0x",
+        Group::Playback,
+    ),
     sc("Left / Right", "Seek backward / forward 5s", Group::Seeking),
-    sc("Shift + Left / Right", "Seek backward / forward 15s", Group::Seeking),
-    sc("Ctrl + Left / Right", "Seek backward / forward 60s", Group::Seeking),
+    sc(
+        "Shift + Left / Right",
+        "Seek backward / forward 15s",
+        Group::Seeking,
+    ),
+    sc(
+        "Ctrl + Left / Right",
+        "Seek backward / forward 60s",
+        Group::Seeking,
+    ),
     sc("Ctrl + G", "Jump to time", Group::Seeking),
     sc("B", "A-B loop: set A, then B, then clear", Group::Seeking),
+    sc("X", "Toggle clip mode", Group::Seeking),
+    sc(
+        "Shift + [ / Shift + ]",
+        "Clip mode: set start / end at playhead",
+        Group::Seeking,
+    ),
     sc("Up / Down", "Volume up / down (5%)", Group::AudioVideo),
     sc("M", "Mute / Unmute", Group::AudioVideo),
-    sc("Mouse wheel", "Adjust volume over the video", Group::AudioVideo),
+    sc(
+        "Mouse wheel",
+        "Adjust volume over the video",
+        Group::AudioVideo,
+    ),
     sc("Ctrl + E", "Equalizer & video filters", Group::AudioVideo),
-    sc("A", "Cycle aspect ratio (Fit, Fill, 16:9, 4:3, 21:9, Original)", Group::AudioVideo),
-    sc("H", "Cycle hardware acceleration (Auto, D3D11VA, D3D12VA, CUDA, Vulkan, CPU)", Group::AudioVideo),
+    sc(
+        "A",
+        "Cycle aspect ratio (Fit, Fill, 16:9, 4:3, 21:9, Original)",
+        Group::AudioVideo,
+    ),
+    sc(
+        "H",
+        "Cycle hardware acceleration (Auto, D3D11VA, D3D12VA, CUDA, Vulkan, CPU)",
+        Group::AudioVideo,
+    ),
     sc("Shift + S", "Take screenshot", Group::AudioVideo),
     hint("L", "Toggle playlist drawer", Group::Playlist, "playlist"),
     sc("Delete", "Remove selected playlist items", Group::Playlist),
-    sc("Ctrl / Shift + Click", "Select several playlist items", Group::Playlist),
+    sc(
+        "Ctrl / Shift + Click",
+        "Select several playlist items",
+        Group::Playlist,
+    ),
     sc("Drag", "Reorder playlist items", Group::Playlist),
     hint("O", "Open media file", Group::Window, "open"),
     sc("Ctrl + N", "Open network stream", Group::Window),
-    sc("Ctrl + Shift + N", "New incognito window (nothing watched there is saved)", Group::Window),
+    sc(
+        "Ctrl + Shift + N",
+        "New incognito window (nothing watched there is saved)",
+        Group::Window,
+    ),
     sc("Ctrl + F", "Search the library", Group::Window),
     hint("F or F11", "Toggle fullscreen", Group::Window, "fullscreen"),
     sc("Double click", "Toggle fullscreen", Group::Window),
-    sc("Esc", "Close dialog / exit fullscreen / back to the library", Group::Window),
+    sc(
+        "Esc",
+        "Close dialog / exit fullscreen / back to the library",
+        Group::Window,
+    ),
     sc("Ctrl + T", "Toggle always on top", Group::Window),
     sc("I", "Media information", Group::Window),
     sc("Ctrl + P", "Preferences", Group::Window),
-    hint("? or F1", "Show keyboard shortcuts", Group::Window, "shortcuts"),
+    hint(
+        "? or F1",
+        "Show keyboard shortcuts",
+        Group::Window,
+        "shortcuts",
+    ),
     sc("Ctrl + Q", "Quit", Group::Window),
 ];
 

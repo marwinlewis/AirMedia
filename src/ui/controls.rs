@@ -2,7 +2,7 @@
 //! bottom, and the big icon that flashes on play/pause.
 
 use super::canvas::AspectRatioMode;
-use super::icons::{pill_button, Icon, PillStyle};
+use super::icons::{icon_button, pill_button, Icon, PillStyle};
 use super::preferences_dialog::PreferencesState;
 use super::theme::Theme;
 use super::window_chrome;
@@ -10,8 +10,8 @@ use crate::media::decoder::HwAccelMode;
 use crate::media::MediaPlayer;
 use crate::playlist::RepeatMode;
 use eframe::egui::{
-    self, text::LayoutJob, text::TextWrapping, Align2, Id, Popup, PopupCloseBehavior, Pos2, Rect, RectAlign, Response, RichText, Sense,
-    Ui, UiBuilder, Vec2,
+    self, text::LayoutJob, text::TextWrapping, Align2, Id, Popup, PopupCloseBehavior, Pos2, Rect,
+    RectAlign, Response, RichText, Sense, Stroke, Ui, UiBuilder, Vec2,
 };
 use std::time::Instant;
 
@@ -19,6 +19,8 @@ pub const SPEEDS: [f32; 8] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5];
 
 /// Height the bottom controls take up, for lifting subtitles and laying out the audio screen.
 pub const BOTTOM_CONTROLS_H: f32 = 104.0;
+/// Height of the docked clip cutting bar.
+pub const CLIP_BAR_H: f32 = 36.0;
 const TOP_BAR_H: f32 = 84.0;
 const FLASH_SECS: f32 = 0.55;
 /// How long before the end the "next" shortcut appears.
@@ -58,6 +60,13 @@ pub struct ControlsCtx<'a> {
     pub has_queue: bool,
     pub audio_only: bool,
     pub take_screenshot: &'a mut bool,
+    pub can_clip: bool,
+    pub clip_mode: bool,
+    pub clip_range: Option<&'a mut crate::clip::ClipRange>,
+    pub clip_preview: bool,
+    pub toggle_clip_mode: &'a mut bool,
+    pub toggle_clip_preview: &'a mut bool,
+    pub open_clip_dialog: &'a mut bool,
 }
 
 pub struct ControlsOutput {
@@ -79,34 +88,75 @@ impl ControlsView {
     }
 
     /// Paints the controls over `area` (and top header across `top_area`), faded by `opacity` (0 = hidden, nothing interactive).
-    pub fn show(&mut self, ui: &mut Ui, area: Rect, top_area: Rect, opacity: f32, player: &mut MediaPlayer, mut cx: ControlsCtx<'_>) -> Option<ControlsOutput> {
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        area: Rect,
+        top_area: Rect,
+        opacity: f32,
+        player: &mut MediaPlayer,
+        mut cx: ControlsCtx<'_>,
+    ) -> Option<ControlsOutput> {
         self.up_next_shortcut(ui, area, opacity, player, &mut cx);
         if opacity <= 0.001 {
             return None;
         }
 
         let layer_rect = area.union(top_area);
-        let mut layer = ui.new_child(UiBuilder::new().id_salt("player_controls").max_rect(layer_rect));
+        let mut layer = ui.new_child(
+            UiBuilder::new()
+                .id_salt("player_controls")
+                .max_rect(layer_rect),
+        );
         layer.multiply_opacity(opacity);
         layer.shrink_clip_rect(layer_rect);
         layer.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
 
         let top_grad = Rect::from_min_size(area.min, Vec2::new(area.width(), TOP_BAR_H));
-        let top_bar = Rect::from_min_size(top_area.min, Vec2::new(top_area.width(), super::browse::NAV_HEIGHT));
-        let bottom = Rect::from_min_max(Pos2::new(area.min.x, area.max.y - BOTTOM_CONTROLS_H - 44.0), area.max);
+        let top_bar = Rect::from_min_size(
+            top_area.min,
+            Vec2::new(top_area.width(), super::browse::NAV_HEIGHT),
+        );
+        let bottom_lift = if cx.clip_mode { CLIP_BAR_H + 8.0 } else { 0.0 };
+        let total_bottom_h = BOTTOM_CONTROLS_H + bottom_lift;
+        let bottom = Rect::from_min_max(
+            Pos2::new(area.min.x, area.max.y - total_bottom_h - 44.0),
+            area.max,
+        );
         let painter = layer.painter().clone();
-        Theme::paint_vertical_gradient(&painter, top_grad.with_max_y(top_grad.max.y + 36.0), Theme::black(225), Theme::black(0));
+        Theme::paint_vertical_gradient(
+            &painter,
+            top_grad.with_max_y(top_grad.max.y + 36.0),
+            Theme::black(225),
+            Theme::black(0),
+        );
         Theme::paint_vertical_gradient(&painter, bottom, Theme::black(0), Theme::black(225));
 
-        window_chrome::handle_titlebar_drag(&mut layer, top_bar, Id::unique("player_top_drag"), cx.is_fullscreen);
+        window_chrome::handle_titlebar_drag(
+            &mut layer,
+            top_bar,
+            Id::unique("player_top_drag"),
+            cx.is_fullscreen,
+        );
 
         let pad = (area.width() * 0.025).clamp(10.0, 28.0);
         let top_pad = (top_area.width() * 0.025).clamp(10.0, 28.0);
 
         // --- Top: back, title, menu, custom window controls ---
-        let row = Rect::from_min_size(top_area.min + Vec2::new(top_pad, 12.0), Vec2::new(top_area.width() - top_pad * 2.0, 44.0));
-        let mut top_ui = layer.new_child(UiBuilder::new().id_salt("player_top").max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        if icon_button_big(&mut top_ui, Icon::ArrowLeft, 44.0).on_hover_text("Back to library (Esc)").clicked() {
+        let row = Rect::from_min_size(
+            top_area.min + Vec2::new(top_pad, 12.0),
+            Vec2::new(top_area.width() - top_pad * 2.0, 44.0),
+        );
+        let mut top_ui = layer.new_child(
+            UiBuilder::new()
+                .id_salt("player_top")
+                .max_rect(row)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        if icon_button_big(&mut top_ui, Icon::ArrowLeft, 44.0)
+            .on_hover_text("Back to library (Esc)")
+            .clicked()
+        {
             *cx.go_back = true;
         }
         let right_reserve = window_chrome::right_reserve(top_area.width(), cx.is_fullscreen);
@@ -115,9 +165,17 @@ impl ControlsView {
         } else {
             row.max.x
         };
-        let menu_row = Rect::from_min_max(row.min, Pos2::new(menu_max_x.max(row.min.x + 40.0), row.max.y));
+        let menu_row = Rect::from_min_max(
+            row.min,
+            Pos2::new(menu_max_x.max(row.min.x + 40.0), row.max.y),
+        );
         let menu = {
-            let mut right = top_ui.new_child(UiBuilder::new().id_salt("player_top_right").max_rect(menu_row).layout(egui::Layout::right_to_left(egui::Align::Center)));
+            let mut right = top_ui.new_child(
+                UiBuilder::new()
+                    .id_salt("player_top_right")
+                    .max_rect(menu_row)
+                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            );
             icon_button_big(&mut right, Icon::Menu, 40.0).on_hover_text("Menu")
         };
         window_chrome::show_window_controls(&mut layer, top_bar, cx.is_fullscreen);
@@ -131,58 +189,113 @@ impl ControlsView {
         };
         if !cx.audio_only {
             if cx.subtitle.is_empty() {
-                painter.galley(Pos2::new(text_x, row.center().y - 13.0), text_line(cx.title, Theme::font_bold(18.5), Theme::TEXT), Theme::TEXT);
+                painter.galley(
+                    Pos2::new(text_x, row.center().y - 13.0),
+                    text_line(cx.title, Theme::font_bold(18.5), Theme::TEXT),
+                    Theme::TEXT,
+                );
             } else {
-                painter.galley(Pos2::new(text_x, row.min.y), text_line(cx.title, Theme::font_bold(17.5), Theme::TEXT), Theme::TEXT);
-                painter.galley(Pos2::new(text_x, row.min.y + 25.0), text_line(cx.subtitle, Theme::font(13.0), Theme::TEXT_MUTED), Theme::TEXT_MUTED);
+                painter.galley(
+                    Pos2::new(text_x, row.min.y),
+                    text_line(cx.title, Theme::font_bold(17.5), Theme::TEXT),
+                    Theme::TEXT,
+                );
+                painter.galley(
+                    Pos2::new(text_x, row.min.y + 25.0),
+                    text_line(cx.subtitle, Theme::font(13.0), Theme::TEXT_MUTED),
+                    Theme::TEXT_MUTED,
+                );
             }
         }
 
         // --- Bottom: seek bar with remaining time, then the transport row ---
         let cur_time = player.current_time_secs();
         let dur = player.duration_secs;
-        let seek_rect = Rect::from_min_size(Pos2::new(area.min.x + pad, area.max.y - 92.0), Vec2::new(area.width() - pad * 2.0, 20.0));
-        let mut seek_ui = layer.new_child(UiBuilder::new().id_salt("player_seek").max_rect(seek_rect));
-        self.seek_bar(&mut seek_ui, cur_time, dur, player, cx.ab_loop);
 
-        let row = Rect::from_min_size(Pos2::new(area.min.x + pad, area.max.y - 68.0), Vec2::new(area.width() - pad * 2.0, 56.0));
-        let w = row.width();
-        let wide = w >= 900.0;
+        let w = area.width() - pad * 2.0;
         let medium = w >= 620.0;
+        let wide = w >= 900.0;
 
-        let mut left = layer.new_child(UiBuilder::new().id_salt("player_left").max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        left.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
-
-        if !player.is_playing && !cx.audio_only {
-            if icon_button_big(&mut left, Icon::FramePrev, 34.0)
-                .on_hover_text("Previous frame (,)")
-                .clicked()
-            {
-                player.step_frame(false);
-            }
+        if cx.clip_mode {
+            let clip_rect = Rect::from_min_size(
+                Pos2::new(area.min.x + pad, area.max.y - 92.0 - CLIP_BAR_H - 4.0),
+                Vec2::new(area.width() - pad * 2.0, CLIP_BAR_H),
+            );
+            self.clip_bar(&mut layer, clip_rect, medium, player, &mut cx);
         }
 
-        let play_icon = if player.is_playing { Icon::Pause } else { Icon::Play };
+        let seek_rect = Rect::from_min_size(
+            Pos2::new(area.min.x + pad, area.max.y - 92.0),
+            Vec2::new(area.width() - pad * 2.0, 20.0),
+        );
+        let mut seek_ui =
+            layer.new_child(UiBuilder::new().id_salt("player_seek").max_rect(seek_rect));
+        self.seek_bar(
+            &mut seek_ui,
+            cur_time,
+            dur,
+            player,
+            cx.ab_loop,
+            cx.clip_range.as_deref_mut(),
+        );
+
+        let row = Rect::from_min_size(
+            Pos2::new(area.min.x + pad, area.max.y - 68.0),
+            Vec2::new(area.width() - pad * 2.0, 56.0),
+        );
+
+        let mut left = layer.new_child(
+            UiBuilder::new()
+                .id_salt("player_left")
+                .max_rect(row)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        left.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
+
+        if !player.is_playing
+            && !cx.audio_only
+            && icon_button_big(&mut left, Icon::FramePrev, 34.0)
+                .on_hover_text("Previous frame (,)")
+                .clicked()
+        {
+            player.step_frame(false);
+        }
+
+        let play_icon = if player.is_playing {
+            Icon::Pause
+        } else {
+            Icon::Play
+        };
         if icon_button_big(&mut left, play_icon, 50.0)
-            .on_hover_text(if player.is_playing { "Pause (Space)" } else { "Play (Space)" })
+            .on_hover_text(if player.is_playing {
+                "Pause (Space)"
+            } else {
+                "Play (Space)"
+            })
             .clicked()
         {
             player.toggle_play();
         }
 
-        if !player.is_playing && !cx.audio_only {
-            if icon_button_big(&mut left, Icon::FrameNext, 34.0)
+        if !player.is_playing
+            && !cx.audio_only
+            && icon_button_big(&mut left, Icon::FrameNext, 34.0)
                 .on_hover_text("Next frame (.)")
                 .clicked()
-            {
-                player.step_frame(true);
-            }
+        {
+            player.step_frame(true);
         }
         if medium {
-            if icon_button_big(&mut left, Icon::Back10, 46.0).on_hover_text("Back 10 seconds").clicked() {
+            if icon_button_big(&mut left, Icon::Back10, 46.0)
+                .on_hover_text("Back 10 seconds")
+                .clicked()
+            {
                 player.seek(cur_time - 10.0);
             }
-            if icon_button_big(&mut left, Icon::Forward10, 46.0).on_hover_text("Forward 10 seconds").clicked() {
+            if icon_button_big(&mut left, Icon::Forward10, 46.0)
+                .on_hover_text("Forward 10 seconds")
+                .clicked()
+            {
                 player.seek(cur_time + 10.0);
             }
         }
@@ -196,7 +309,10 @@ impl ControlsView {
         } else {
             Icon::VolumeHigh
         };
-        if icon_button_big(&mut left, vol_icon, 46.0).on_hover_text(if muted { "Unmute (M)" } else { "Mute (M)" }).clicked() {
+        if icon_button_big(&mut left, vol_icon, 46.0)
+            .on_hover_text(if muted { "Unmute (M)" } else { "Mute (M)" })
+            .clicked()
+        {
             player.toggle_mute();
         }
         if wide {
@@ -229,33 +345,65 @@ impl ControlsView {
             self.show_remaining_time = !self.show_remaining_time;
         }
 
-        let mut right = layer.new_child(UiBuilder::new().id_salt("player_right").max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        let mut right = layer.new_child(
+            UiBuilder::new()
+                .id_salt("player_right")
+                .max_rect(row)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
         right.spacing_mut().item_spacing = Vec2::new(4.0, 0.0);
 
-        let fs_icon = if cx.is_fullscreen { Icon::ExitFullscreen } else { Icon::Fullscreen };
-        if icon_button_big(&mut right, fs_icon, 46.0).on_hover_text("Fullscreen (F)").clicked() {
+        let fs_icon = if cx.is_fullscreen {
+            Icon::ExitFullscreen
+        } else {
+            Icon::Fullscreen
+        };
+        if icon_button_big(&mut right, fs_icon, 46.0)
+            .on_hover_text("Fullscreen (F)")
+            .clicked()
+        {
             *cx.toggle_fullscreen = true;
         }
 
-        let settings_resp = icon_button_big(&mut right, Icon::Settings, 46.0).on_hover_text("Settings");
+        let settings_resp =
+            icon_button_big(&mut right, Icon::Settings, 46.0).on_hover_text("Settings");
         popup_above(&settings_resp).width(300.0).show(|ui| {
-            settings_menu(ui, player, cx.aspect_mode, cx.show_info, cx.show_preferences, cx.show_equalizer, cx.ab_loop, cx.cycle_ab_loop, cx.open_jump, cx.take_screenshot);
+            settings_menu(
+                ui,
+                player,
+                cx.aspect_mode,
+                cx.show_info,
+                cx.show_preferences,
+                cx.show_equalizer,
+                cx.ab_loop,
+                cx.cycle_ab_loop,
+                cx.open_jump,
+                cx.take_screenshot,
+            );
         });
 
-        let tracks_resp = icon_button_big(&mut right, Icon::Subtitles, 46.0).on_hover_text("Audio & subtitles");
-        popup_above(&tracks_resp).width(if area.width() < 480.0 { 280.0 } else { 440.0 }).show(|ui| {
-            tracks_menu(ui, player);
-        });
+        let tracks_resp =
+            icon_button_big(&mut right, Icon::Subtitles, 46.0).on_hover_text("Audio & subtitles");
+        popup_above(&tracks_resp)
+            .width(if area.width() < 480.0 { 280.0 } else { 440.0 })
+            .show(|ui| {
+                tracks_menu(ui, player);
+            });
 
         if medium {
             let speed = player.playback_speed;
-            let speed_resp = icon_button_ex_big(&mut right, Icon::Speed, 46.0, (speed - 1.0).abs() > 0.01)
-                .on_hover_text(format!("Playback speed ({}\u{00d7})", trim_speed(speed)));
+            let speed_resp =
+                icon_button_ex_big(&mut right, Icon::Speed, 46.0, (speed - 1.0).abs() > 0.01)
+                    .on_hover_text(format!("Playback speed ({}\u{00d7})", trim_speed(speed)));
             popup_above(&speed_resp).width(150.0).show(|ui| {
                 section_label(ui, "Playback speed");
                 for s in SPEEDS {
                     let selected = (player.playback_speed - s).abs() < 0.01;
-                    let label = if s == 1.0 { "1\u{00d7} (Normal)".to_string() } else { format!("{}\u{00d7}", trim_speed(s)) };
+                    let label = if s == 1.0 {
+                        "1\u{00d7} (Normal)".to_string()
+                    } else {
+                        format!("{}\u{00d7}", trim_speed(s))
+                    };
                     if option_row(ui, selected, &label).clicked() {
                         player.set_speed(s);
                         ui.close();
@@ -264,32 +412,53 @@ impl ControlsView {
             });
         }
 
-        if medium && !cx.audio_only {
-            if icon_button_big(&mut right, Icon::Camera, 46.0)
+        if medium
+            && !cx.audio_only
+            && icon_button_big(&mut right, Icon::Camera, 46.0)
                 .on_hover_text("Take screenshot (Shift+S)")
                 .clicked()
-            {
-                *cx.take_screenshot = true;
+        {
+            *cx.take_screenshot = true;
+        }
+
+        if cx.can_clip {
+            let active = cx.clip_mode;
+            let clip_resp = icon_button_ex_big(&mut right, Icon::Scissors, 46.0, active)
+                .on_hover_text("Clip mode (X)");
+            if clip_resp.clicked() {
+                *cx.toggle_clip_mode = true;
             }
         }
 
-        let playlist_resp = icon_button_ex_big(&mut right, Icon::Playlist, 46.0, *cx.show_playlist).on_hover_text("Playlist (L)");
+        let playlist_resp = icon_button_ex_big(&mut right, Icon::Playlist, 46.0, *cx.show_playlist)
+            .on_hover_text("Playlist (L)");
         if playlist_resp.clicked() {
             *cx.show_playlist = !*cx.show_playlist;
         }
 
         if medium {
             let repeat_on = *cx.repeat != RepeatMode::Off;
-            let repeat_resp = icon_button_ex_big(&mut right, Icon::Repeat, 40.0, repeat_on).on_hover_text(cx.repeat.name());
+            let repeat_resp = icon_button_ex_big(&mut right, Icon::Repeat, 40.0, repeat_on)
+                .on_hover_text(cx.repeat.name());
             if *cx.repeat == RepeatMode::One {
                 let badge = repeat_resp.rect.right_top() + Vec2::new(-8.0, 10.0);
-                right.painter().text(badge, Align2::CENTER_CENTER, "1", Theme::font_bold(10.0), Theme::ACCENT);
+                right.painter().text(
+                    badge,
+                    Align2::CENTER_CENTER,
+                    "1",
+                    Theme::font_bold(10.0),
+                    Theme::ACCENT,
+                );
             }
             if repeat_resp.clicked() {
                 *cx.repeat = cx.repeat.cycle();
             }
             if icon_button_ex_big(&mut right, Icon::Shuffle, 40.0, *cx.shuffle)
-                .on_hover_text(if *cx.shuffle { "Shuffle on" } else { "Shuffle off" })
+                .on_hover_text(if *cx.shuffle {
+                    "Shuffle on"
+                } else {
+                    "Shuffle off"
+                })
                 .clicked()
             {
                 *cx.shuffle = !*cx.shuffle;
@@ -297,21 +466,42 @@ impl ControlsView {
         }
 
         if cx.has_queue {
-            if icon_button_big(&mut right, Icon::Next, 46.0).on_hover_text("Next (N)").clicked() {
+            if icon_button_big(&mut right, Icon::Next, 46.0)
+                .on_hover_text("Next (N)")
+                .clicked()
+            {
                 *cx.play_next = true;
             }
-            if medium && icon_button_big(&mut right, Icon::Prev, 46.0).on_hover_text("Previous (P)").clicked() {
+            if medium
+                && icon_button_big(&mut right, Icon::Prev, 46.0)
+                    .on_hover_text("Previous (P)")
+                    .clicked()
+            {
                 *cx.play_prev = true;
             }
         }
 
         let top_hover = Rect::from_min_size(top_area.min, Vec2::new(top_area.width(), TOP_BAR_H));
-        let hovered = layer.rect_contains_pointer(top_hover) || layer.rect_contains_pointer(Rect::from_min_max(Pos2::new(area.min.x, area.max.y - BOTTOM_CONTROLS_H), area.max));
-        Some(ControlsOutput { hovered: hovered || self.is_seeking, menu })
+        let hovered = layer.rect_contains_pointer(top_hover)
+            || layer.rect_contains_pointer(Rect::from_min_max(
+                Pos2::new(area.min.x, area.max.y - total_bottom_h),
+                area.max,
+            ));
+        Some(ControlsOutput {
+            hovered: hovered || self.is_seeking,
+            menu,
+        })
     }
 
     /// Button that appears near the end of an item and jumps straight to the next one.
-    fn up_next_shortcut(&mut self, ui: &mut Ui, area: Rect, opacity: f32, player: &mut MediaPlayer, cx: &mut ControlsCtx<'_>) {
+    fn up_next_shortcut(
+        &mut self,
+        ui: &mut Ui,
+        area: Rect,
+        opacity: f32,
+        player: &mut MediaPlayer,
+        cx: &mut ControlsCtx<'_>,
+    ) {
         let Some(next) = cx.up_next else { return };
         let dur = player.duration_secs;
         let left = dur - player.current_time_secs();
@@ -319,12 +509,36 @@ impl ControlsView {
             return;
         }
         let label: String = next.chars().take(34).collect();
-        let label = if next.chars().count() > 34 { format!("Next: {label}\u{2026}") } else { format!("Next: {label}") };
+        let label = if next.chars().count() > 34 {
+            format!("Next: {label}\u{2026}")
+        } else {
+            format!("Next: {label}")
+        };
         // Sits above the controls when they're showing, in the corner when they're not.
-        let lift = if opacity > 0.5 { BOTTOM_CONTROLS_H + 16.0 } else { 32.0 };
-        let rect = Rect::from_min_size(Pos2::new(area.min.x, area.max.y - lift - 44.0), Vec2::new(area.width() - 28.0, 44.0));
-        let mut host = ui.new_child(UiBuilder::new().id_salt("up_next").max_rect(rect).layout(egui::Layout::right_to_left(egui::Align::Center)));
-        if pill_button(&mut host, Some(Icon::Next), &label, PillStyle::Primary, 42.0).clicked() {
+        let lift = if opacity > 0.5 {
+            BOTTOM_CONTROLS_H + 16.0
+        } else {
+            32.0
+        };
+        let rect = Rect::from_min_size(
+            Pos2::new(area.min.x, area.max.y - lift - 44.0),
+            Vec2::new(area.width() - 28.0, 44.0),
+        );
+        let mut host = ui.new_child(
+            UiBuilder::new()
+                .id_salt("up_next")
+                .max_rect(rect)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        if pill_button(
+            &mut host,
+            Some(Icon::Next),
+            &label,
+            PillStyle::Primary,
+            42.0,
+        )
+        .clicked()
+        {
             *cx.play_next = true;
         }
     }
@@ -333,7 +547,11 @@ impl ControlsView {
     pub fn paint_flash(&mut self, ui: &Ui, area: Rect, player: &MediaPlayer) {
         if player.is_playing != self.was_playing {
             self.was_playing = player.is_playing;
-            let icon = if player.is_playing { Icon::Play } else { Icon::Pause };
+            let icon = if player.is_playing {
+                Icon::Play
+            } else {
+                Icon::Pause
+            };
             self.flash = Some((icon, Instant::now()));
         }
         let Some((icon, at)) = self.flash else { return };
@@ -348,11 +566,178 @@ impl ControlsView {
         let painter = ui.painter();
         painter.circle_filled(c, size / 2.0, Theme::black((170.0 * alpha) as u8));
         let color = egui::Color32::from_white_alpha((255.0 * alpha) as u8);
-        icon.paint(painter, Rect::from_center_size(c, Vec2::splat(size * 0.48)), color);
+        icon.paint(
+            painter,
+            Rect::from_center_size(c, Vec2::splat(size * 0.48)),
+            color,
+        );
         ui.ctx().request_repaint();
     }
 
-    fn seek_bar(&mut self, ui: &mut Ui, cur_time: f64, total: f64, player: &mut MediaPlayer, ab: crate::ab_loop::AbLoop) {
+    fn clip_bar(
+        &mut self,
+        layer: &mut Ui,
+        rect: Rect,
+        medium: bool,
+        player: &mut MediaPlayer,
+        cx: &mut ControlsCtx<'_>,
+    ) {
+        let Some(range) = cx.clip_range.as_deref_mut() else {
+            return;
+        };
+        let cur_time = player.current_time_secs();
+        let dur = player.duration_secs;
+
+        let painter = layer.painter();
+        painter.rect_filled(rect, Theme::radius_md(), Theme::black(180));
+        painter.rect_stroke(
+            rect,
+            Theme::radius_md(),
+            Stroke::new(1.0, Theme::white(28)),
+            egui::StrokeKind::Inside,
+        );
+
+        let mut bar_ui = layer.new_child(
+            UiBuilder::new()
+                .id_salt("clip_bar")
+                .max_rect(rect.shrink2(Vec2::new(8.0, 0.0)))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        bar_ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
+
+        // [Set start]
+        let start_str = crate::clip::format_time_millis(range.start);
+        let start_label = if medium {
+            format!("[Set start] {start_str}")
+        } else {
+            format!("[In] {start_str}")
+        };
+        let start_btn = bar_ui
+            .add(
+                egui::Button::new(
+                    RichText::new(start_label)
+                        .font(Theme::font_semibold(12.0))
+                        .color(Theme::TEXT),
+                )
+                .fill(Theme::white(20))
+                .corner_radius(Theme::radius_sm())
+                .min_size(Vec2::new(0.0, 26.0)),
+            )
+            .on_hover_text("Set clip start at current playhead position (Shift+[)");
+        if start_btn.clicked() {
+            range.set_start(cur_time, dur);
+        }
+
+        // [Set end]
+        let end_str = crate::clip::format_time_millis(range.end);
+        let end_label = if medium {
+            format!("[Set end] {end_str}")
+        } else {
+            format!("[Out] {end_str}")
+        };
+        let end_btn = bar_ui
+            .add(
+                egui::Button::new(
+                    RichText::new(end_label)
+                        .font(Theme::font_semibold(12.0))
+                        .color(Theme::TEXT),
+                )
+                .fill(Theme::white(20))
+                .corner_radius(Theme::radius_sm())
+                .min_size(Vec2::new(0.0, 26.0)),
+            )
+            .on_hover_text("Set clip end at current playhead position (Shift+])");
+        if end_btn.clicked() {
+            range.set_end(cur_time, dur);
+        }
+
+        // · duration
+        let dur_label = format!("· {:.2}s", range.duration());
+        bar_ui.label(
+            RichText::new(dur_label)
+                .font(Theme::font_semibold(12.0))
+                .color(Theme::TEXT_MUTED),
+        );
+
+        // frame-nudge buttons
+        if icon_button(&mut bar_ui, Icon::FramePrev, 26.0)
+            .on_hover_text("Step back 1 frame (,)")
+            .clicked()
+        {
+            player.step_frame(false);
+        }
+        if icon_button(&mut bar_ui, Icon::FrameNext, 26.0)
+            .on_hover_text("Step forward 1 frame (.)")
+            .clicked()
+        {
+            player.step_frame(true);
+        }
+
+        // Right side: Close, Export, Preview
+        bar_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |right| {
+            right.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
+
+            // ✕ Close
+            if icon_button(right, Icon::Close, 26.0)
+                .on_hover_text("Close clip bar (X)")
+                .clicked()
+            {
+                *cx.toggle_clip_mode = true;
+            }
+
+            // Export clip…
+            let export_style = PillStyle::Primary;
+            let export_resp = if medium {
+                pill_button(
+                    right,
+                    Some(Icon::Scissors),
+                    "Export clip\u{2026}",
+                    export_style,
+                    26.0,
+                )
+            } else {
+                icon_button(right, Icon::Scissors, 26.0).on_hover_text("Export clip\u{2026}")
+            };
+            if export_resp.clicked() {
+                *cx.open_clip_dialog = true;
+            }
+
+            // Preview
+            let prev_icon = if cx.clip_preview {
+                Icon::Pause
+            } else {
+                Icon::Play
+            };
+            let prev_label = if cx.clip_preview {
+                "Stop preview"
+            } else {
+                "Preview"
+            };
+            let prev_style = if cx.clip_preview {
+                PillStyle::Primary
+            } else {
+                PillStyle::Secondary
+            };
+            let prev_resp = if medium {
+                pill_button(right, Some(prev_icon), prev_label, prev_style, 26.0)
+            } else {
+                icon_button(right, prev_icon, 26.0).on_hover_text(prev_label)
+            };
+            if prev_resp.clicked() {
+                *cx.toggle_clip_preview = true;
+            }
+        });
+    }
+
+    fn seek_bar(
+        &mut self,
+        ui: &mut Ui,
+        cur_time: f64,
+        total: f64,
+        player: &mut MediaPlayer,
+        ab: crate::ab_loop::AbLoop,
+        mut clip: Option<&mut crate::clip::ClipRange>,
+    ) {
         let rect = ui.max_rect();
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter();
@@ -362,50 +747,183 @@ impl ControlsView {
         let rail_h = 4.0 + 2.5 * grow;
         let rail = Rect::from_center_size(rect.center(), Vec2::new(rect.width(), rail_h));
 
+        let x_at =
+            |t: f64| rail.min.x + rail.width() * (t / total.max(0.001)).clamp(0.0, 1.0) as f32;
+
+        let mut handle_dragged = false;
+        if let Some(range) = clip.as_deref_mut() {
+            if total > 0.0 {
+                let start_x = x_at(range.start);
+                let end_x = x_at(range.end);
+
+                let start_hit = Rect::from_center_size(
+                    Pos2::new(start_x, rail.center().y),
+                    Vec2::new(14.0, 24.0),
+                );
+                let end_hit = Rect::from_center_size(
+                    Pos2::new(end_x, rail.center().y),
+                    Vec2::new(14.0, 24.0),
+                );
+
+                let start_resp = ui.interact(
+                    start_hit,
+                    ui.scope_id().with("clip_start_handle"),
+                    Sense::click_and_drag(),
+                );
+                let end_resp = ui.interact(
+                    end_hit,
+                    ui.scope_id().with("clip_end_handle"),
+                    Sense::click_and_drag(),
+                );
+
+                if start_resp.hovered()
+                    || start_resp.dragged()
+                    || end_resp.hovered()
+                    || end_resp.dragged()
+                {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+
+                if start_resp.dragged() || start_resp.clicked() {
+                    handle_dragged = true;
+                    if let Some(p) = start_resp.interact_pointer_pos() {
+                        let f = ((p.x - rail.min.x) / rail.width()).clamp(0.0, 1.0);
+                        range.set_start(f as f64 * total, total);
+                    }
+                }
+
+                if end_resp.dragged() || end_resp.clicked() {
+                    handle_dragged = true;
+                    if let Some(p) = end_resp.interact_pointer_pos() {
+                        let f = ((p.x - rail.min.x) / rail.width()).clamp(0.0, 1.0);
+                        range.set_end(f as f64 * total, total);
+                    }
+                }
+            }
+        }
+
         let pointer_frac = resp
             .hover_pos()
             .or(resp.interact_pointer_pos())
             .map(|p| ((p.x - rail.min.x) / rail.width()).clamp(0.0, 1.0));
 
-        if (resp.drag_started() || resp.dragged()) && total > 0.0 {
-            self.is_seeking = true;
-            if let Some(f) = pointer_frac {
-                self.seek_preview_secs = Some(f as f64 * total);
+        if !handle_dragged {
+            if (resp.drag_started() || resp.dragged()) && total > 0.0 {
+                self.is_seeking = true;
+                if let Some(f) = pointer_frac {
+                    self.seek_preview_secs = Some(f as f64 * total);
+                }
             }
-        }
-        if (resp.drag_stopped() || resp.clicked()) && total > 0.0 {
-            if let Some(f) = pointer_frac {
-                player.seek(f as f64 * total);
+            if (resp.drag_stopped() || resp.clicked()) && total > 0.0 {
+                if let Some(f) = pointer_frac {
+                    player.seek(f as f64 * total);
+                }
+                self.is_seeking = false;
+                self.seek_preview_secs = None;
             }
+        } else {
             self.is_seeking = false;
             self.seek_preview_secs = None;
         }
 
         let shown = self.seek_preview_secs.unwrap_or(cur_time);
-        let progress = if total > 0.0 { (shown / total).clamp(0.0, 1.0) as f32 } else { 0.0 };
+        let progress = if total > 0.0 {
+            (shown / total).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
         let r = Theme::radius_full();
 
         painter.rect_filled(rail, r, Theme::white(70));
 
-        if let (Some(f), true) = (pointer_frac, hot) {
-            let hover_rect = Rect::from_min_max(rail.min, Pos2::new(rail.min.x + rail.width() * f, rail.max.y));
+        if let (Some(f), true) = (pointer_frac, hot && !handle_dragged) {
+            let hover_rect = Rect::from_min_max(
+                rail.min,
+                Pos2::new(rail.min.x + rail.width() * f, rail.max.y),
+            );
             painter.rect_filled(hover_rect, r, Theme::white(60));
         }
 
-        let fill = Rect::from_min_max(rail.min, Pos2::new(rail.min.x + rail.width() * progress, rail.max.y));
+        let fill = Rect::from_min_max(
+            rail.min,
+            Pos2::new(rail.min.x + rail.width() * progress, rail.max.y),
+        );
         painter.rect_filled(fill, r, Theme::ACCENT);
 
-        // A-B loop: shaded span plus a tick at each point.
-        if total > 0.0 {
+        // Clip range or A-B loop: shaded span plus markers
+        if let Some(range) = clip.as_deref() {
+            if total > 0.0 {
+                let start_x = x_at(range.start);
+                let end_x = x_at(range.end);
+                let span = Rect::from_min_max(
+                    Pos2::new(start_x, rail.min.y - 2.0),
+                    Pos2::new(end_x, rail.max.y + 2.0),
+                );
+                painter.rect_filled(span, r, Theme::ACCENT.gamma_multiply(0.38));
+
+                // Start handle bracket [
+                let s_color = Theme::ACCENT;
+                painter.rect_filled(
+                    Rect::from_center_size(
+                        Pos2::new(start_x, rail.center().y),
+                        Vec2::new(3.0, 16.0),
+                    ),
+                    Theme::radius_sm(),
+                    s_color,
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(start_x, rail.center().y - 8.0),
+                        Pos2::new(start_x + 4.0, rail.center().y - 8.0),
+                    ],
+                    Stroke::new(2.0, s_color),
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(start_x, rail.center().y + 8.0),
+                        Pos2::new(start_x + 4.0, rail.center().y + 8.0),
+                    ],
+                    Stroke::new(2.0, s_color),
+                );
+
+                // End handle bracket ]
+                let e_color = Theme::ACCENT;
+                painter.rect_filled(
+                    Rect::from_center_size(Pos2::new(end_x, rail.center().y), Vec2::new(3.0, 16.0)),
+                    Theme::radius_sm(),
+                    e_color,
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(end_x, rail.center().y - 8.0),
+                        Pos2::new(end_x - 4.0, rail.center().y - 8.0),
+                    ],
+                    Stroke::new(2.0, e_color),
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(end_x, rail.center().y + 8.0),
+                        Pos2::new(end_x - 4.0, rail.center().y + 8.0),
+                    ],
+                    Stroke::new(2.0, e_color),
+                );
+            }
+        } else if total > 0.0 {
             let x_at = |t: f64| rail.min.x + rail.width() * (t / total).clamp(0.0, 1.0) as f32;
             if let (Some(a), Some(b)) = (ab.a, ab.b) {
-                let span = Rect::from_min_max(Pos2::new(x_at(a), rail.min.y - 2.0), Pos2::new(x_at(b), rail.max.y + 2.0));
+                let span = Rect::from_min_max(
+                    Pos2::new(x_at(a), rail.min.y - 2.0),
+                    Pos2::new(x_at(b), rail.max.y + 2.0),
+                );
                 painter.rect_filled(span, r, Theme::ACCENT_SOFT.gamma_multiply(0.35));
             }
             for p in [ab.a, ab.b].into_iter().flatten() {
                 let x = x_at(p);
                 painter.line_segment(
-                    [Pos2::new(x, rail.min.y - 5.0), Pos2::new(x, rail.max.y + 5.0)],
+                    [
+                        Pos2::new(x, rail.min.y - 5.0),
+                        Pos2::new(x, rail.max.y + 5.0),
+                    ],
                     egui::Stroke::new(2.0, Theme::ACCENT_SOFT),
                 );
             }
@@ -415,18 +933,19 @@ impl ControlsView {
         painter.circle_filled(knob_center, 5.5 + 2.5 * grow, Theme::ACCENT);
 
         // Floating time bubble when hovering
-        if let (Some(f), true, true) = (pointer_frac, hot, total > 0.0) {
+        if let (Some(f), true, true) = (pointer_frac, hot && !handle_dragged, total > 0.0) {
             let secs = f as f64 * total;
             let text = format_time(secs);
             let galley = painter.layout_no_wrap(text, Theme::font_semibold(12.5), Theme::TEXT);
             let size = galley.size() + Vec2::new(16.0, 8.0);
-            let x = (rail.min.x + rail.width() * f).clamp(rail.min.x + size.x / 2.0, rail.max.x - size.x / 2.0);
+            let x = (rail.min.x + rail.width() * f)
+                .clamp(rail.min.x + size.x / 2.0, rail.max.x - size.x / 2.0);
             let bubble = Rect::from_center_size(Pos2::new(x, rail.min.y - 20.0), size);
             painter.rect_filled(bubble, Theme::radius_sm(), Theme::black(230));
             painter.galley(bubble.center() - galley.size() / 2.0, galley, Theme::TEXT);
         }
 
-        if hot {
+        if hot && !handle_dragged {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
     }
@@ -440,14 +959,29 @@ pub fn icon_button_big(ui: &mut Ui, icon: Icon, size: f32) -> Response {
 pub fn icon_button_ex_big(ui: &mut Ui, icon: Icon, size: f32, active: bool) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     if ui.is_rect_visible(rect) {
-        let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
+        let hover = ui
+            .ctx()
+            .animate_bool_with_time(resp.id, resp.hovered(), 0.12);
         let painter = ui.painter();
         if hover > 0.0 {
-            painter.circle_filled(rect.center(), size * 0.5, Theme::white((30.0 * hover) as u8));
+            painter.circle_filled(
+                rect.center(),
+                size * 0.5,
+                Theme::white((30.0 * hover) as u8),
+            );
         }
         let color = if active { Theme::ACCENT } else { Theme::TEXT };
-        let scale = 0.58 * if resp.is_pointer_button_down_on() { 0.92 } else { 1.0 + 0.06 * hover };
-        icon.paint(painter, Rect::from_center_size(rect.center(), Vec2::splat(size * scale)), color);
+        let scale = 0.58
+            * if resp.is_pointer_button_down_on() {
+                0.92
+            } else {
+                1.0 + 0.06 * hover
+            };
+        icon.paint(
+            painter,
+            Rect::from_center_size(rect.center(), Vec2::splat(size * scale)),
+            color,
+        );
     }
     resp
 }
@@ -469,19 +1003,35 @@ pub fn volume_slider(ui: &mut Ui, value: &mut f32) -> bool {
     }
 
     let painter = ui.painter();
-    let t = ui.ctx().animate_bool_with_time(resp.id, resp.hovered() || resp.dragged(), 0.12);
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(resp.id, resp.hovered() || resp.dragged(), 0.12);
     let rail = Rect::from_center_size(rect.center(), Vec2::new(rect.width(), 4.0));
     let r = Theme::radius_full();
     painter.rect_filled(rail, r, Theme::white(70));
     let frac = (*value / max).clamp(0.0, 1.0);
-    let fill = Rect::from_min_max(rail.min, Pos2::new(rail.min.x + rail.width() * frac, rail.max.y));
-    let fill_color = if *value > 1.0 { Theme::ACCENT } else { Theme::TEXT };
+    let fill = Rect::from_min_max(
+        rail.min,
+        Pos2::new(rail.min.x + rail.width() * frac, rail.max.y),
+    );
+    let fill_color = if *value > 1.0 {
+        Theme::ACCENT
+    } else {
+        Theme::TEXT
+    };
     painter.rect_filled(fill, r, fill_color);
-    painter.circle_filled(Pos2::new(fill.max.x, rail.center().y), 5.0 + 1.5 * t, fill_color);
+    painter.circle_filled(
+        Pos2::new(fill.max.x, rail.center().y),
+        5.0 + 1.5 * t,
+        fill_color,
+    );
     // Marks 100%: everything to the right is boost.
     let hundred = rail.min.x + rail.width() / max;
     painter.line_segment(
-        [Pos2::new(hundred, rail.min.y - 3.0), Pos2::new(hundred, rail.max.y + 3.0)],
+        [
+            Pos2::new(hundred, rail.min.y - 3.0),
+            Pos2::new(hundred, rail.max.y + 3.0),
+        ],
         egui::Stroke::new(1.0, Theme::white(110)),
     );
 
@@ -498,7 +1048,12 @@ fn popup_above(resp: &Response) -> Popup<'_> {
 
 pub fn section_label(ui: &mut Ui, text: &str) {
     ui.add_space(4.0);
-    ui.label(RichText::new(text.to_uppercase()).size(10.5).color(Theme::TEXT_FAINT).strong());
+    ui.label(
+        RichText::new(text.to_uppercase())
+            .size(10.5)
+            .color(Theme::TEXT_FAINT)
+            .strong(),
+    );
     ui.add_space(2.0);
 }
 
@@ -515,10 +1070,21 @@ fn tracks_menu(ui: &mut Ui, player: &mut MediaPlayer) {
                 audio.label(RichText::new("No audio tracks").color(Theme::TEXT_FAINT));
             }
             for (idx, a) in streams.iter().enumerate() {
-                let tag = |key: &str| a.tags.as_ref().and_then(|t| t.get(key)).and_then(|v| v.as_str());
+                let tag = |key: &str| {
+                    a.tags
+                        .as_ref()
+                        .and_then(|t| t.get(key))
+                        .and_then(|v| v.as_str())
+                };
                 let name = tag("title").or(tag("language")).unwrap_or("Track");
                 let codec = a.codec_name.as_deref().unwrap_or("audio");
-                if option_row(audio, player.active_audio_track == idx, &format!("{name} \u{00b7} {codec}")).clicked() {
+                if option_row(
+                    audio,
+                    player.active_audio_track == idx,
+                    &format!("{name} \u{00b7} {codec}"),
+                )
+                .clicked()
+                {
                     chosen = Some(idx);
                 }
             }
@@ -538,7 +1104,13 @@ fn tracks_menu(ui: &mut Ui, player: &mut MediaPlayer) {
         }
         let mut chosen = None;
         for (idx, sub) in player.subtitles.iter().enumerate() {
-            if option_row(subs, player.active_subtitle_track == Some(idx), &format!("{} \u{00b7} {}", sub.name, sub.language)).clicked() {
+            if option_row(
+                subs,
+                player.active_subtitle_track == Some(idx),
+                &format!("{} \u{00b7} {}", sub.name, sub.language),
+            )
+            .clicked()
+            {
                 chosen = Some(idx);
             }
         }
@@ -567,10 +1139,17 @@ fn delay_stepper(ui: &mut Ui, label: &str, delay_ms: i64) -> Option<i64> {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.label(RichText::new(label).size(12.5).color(Theme::TEXT_MUTED));
-        if chip(ui, false, "\u{2212}").on_hover_text("100 ms earlier").clicked() {
+        if chip(ui, false, "\u{2212}")
+            .on_hover_text("100 ms earlier")
+            .clicked()
+        {
             next = Some(delay_ms - 100);
         }
-        ui.label(RichText::new(format!("{delay_ms} ms")).size(12.5).color(Theme::TEXT));
+        ui.label(
+            RichText::new(format!("{delay_ms} ms"))
+                .size(12.5)
+                .color(Theme::TEXT),
+        );
         if chip(ui, false, "+").on_hover_text("100 ms later").clicked() {
             next = Some(delay_ms + 100);
         }
@@ -608,7 +1187,10 @@ fn settings_menu(
     ui.horizontal_wrapped(|ui| {
         for mode in AspectRatioMode::ALL {
             let selected = *aspect == mode;
-            if chip(ui, selected, mode.short_name()).on_hover_text(mode.name()).clicked() {
+            if chip(ui, selected, mode.short_name())
+                .on_hover_text(mode.name())
+                .clicked()
+            {
                 *aspect = mode;
             }
         }
@@ -619,7 +1201,10 @@ fn settings_menu(
     ui.horizontal_wrapped(|ui| {
         for mode in HwAccelMode::ALL {
             let selected = player.hw_accel == mode;
-            if chip(ui, selected, mode.short_name()).on_hover_text(mode.name()).clicked() {
+            if chip(ui, selected, mode.short_name())
+                .on_hover_text(mode.name())
+                .clicked()
+            {
                 player.set_hw_accel(mode);
             }
         }
@@ -661,7 +1246,11 @@ fn settings_menu(
 
 /// Compact pill used for option groups inside popups.
 pub fn chip(ui: &mut Ui, selected: bool, text: &str) -> Response {
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), Theme::font(12.5), egui::Color32::PLACEHOLDER);
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(),
+        Theme::font(12.5),
+        egui::Color32::PLACEHOLDER,
+    );
     let size = galley.size() + Vec2::new(18.0, 8.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     let fill = if selected {
@@ -672,41 +1261,80 @@ pub fn chip(ui: &mut Ui, selected: bool, text: &str) -> Response {
         Theme::white(16)
     };
     ui.painter().rect_filled(rect, Theme::radius_sm(), fill);
-    let text_color = if selected { Theme::BG } else if resp.hovered() { Theme::TEXT } else { Theme::TEXT_MUTED };
-    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, text_color);
+    let text_color = if selected {
+        Theme::BG
+    } else if resp.hovered() {
+        Theme::TEXT
+    } else {
+        Theme::TEXT_MUTED
+    };
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, text_color);
     resp
 }
 
 /// Full-width selectable row with a check mark when selected.
 pub fn option_row(ui: &mut Ui, selected: bool, text: &str) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
     if resp.hovered() {
-        ui.painter().rect_filled(rect, Theme::radius_sm(), Theme::white(16));
+        ui.painter()
+            .rect_filled(rect, Theme::radius_sm(), Theme::white(16));
     }
-    let color = if selected || resp.hovered() { Theme::TEXT } else { Theme::TEXT_MUTED };
+    let color = if selected || resp.hovered() {
+        Theme::TEXT
+    } else {
+        Theme::TEXT_MUTED
+    };
     let mut job = LayoutJob::simple_singleline(text.to_owned(), Theme::font(13.5), color);
     job.wrap = TextWrapping::truncate_at_width(rect.width() - 34.0);
     let galley = ui.painter().layout_job(job);
-    ui.painter().galley(rect.left_center() + Vec2::new(8.0, -galley.size().y / 2.0), galley, color);
+    ui.painter().galley(
+        rect.left_center() + Vec2::new(8.0, -galley.size().y / 2.0),
+        galley,
+        color,
+    );
     if selected {
         let c = rect.right_center() - Vec2::new(14.0, 0.0);
-        Icon::Check.paint(ui.painter(), Rect::from_center_size(c, Vec2::splat(14.0)), Theme::ACCENT);
+        Icon::Check.paint(
+            ui.painter(),
+            Rect::from_center_size(c, Vec2::splat(14.0)),
+            Theme::ACCENT,
+        );
     }
     resp
 }
 
 /// Menu row with a leading icon and an optional right-aligned shortcut.
 pub fn menu_row(ui: &mut Ui, icon: Icon, text: &str, shortcut: &str) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::click());
     if resp.hovered() {
-        ui.painter().rect_filled(rect, Theme::radius_sm(), Theme::white(16));
+        ui.painter()
+            .rect_filled(rect, Theme::radius_sm(), Theme::white(16));
     }
-    let color = if resp.hovered() { Theme::TEXT } else { Theme::TEXT_MUTED };
+    let color = if resp.hovered() {
+        Theme::TEXT
+    } else {
+        Theme::TEXT_MUTED
+    };
     let r = Rect::from_center_size(rect.left_center() + Vec2::new(16.0, 0.0), Vec2::splat(16.0));
     icon.paint(ui.painter(), r, color);
-    ui.painter().text(rect.left_center() + Vec2::new(34.0, 0.0), Align2::LEFT_CENTER, text, Theme::font(13.5), color);
+    ui.painter().text(
+        rect.left_center() + Vec2::new(34.0, 0.0),
+        Align2::LEFT_CENTER,
+        text,
+        Theme::font(13.5),
+        color,
+    );
     if !shortcut.is_empty() {
-        ui.painter().text(rect.right_center() - Vec2::new(8.0, 0.0), Align2::RIGHT_CENTER, shortcut, Theme::font(12.0), Theme::TEXT_FAINT);
+        ui.painter().text(
+            rect.right_center() - Vec2::new(8.0, 0.0),
+            Align2::RIGHT_CENTER,
+            shortcut,
+            Theme::font(12.0),
+            Theme::TEXT_FAINT,
+        );
     }
     resp
 }

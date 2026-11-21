@@ -2,6 +2,7 @@ pub mod about_dialog;
 pub mod artwork;
 pub mod browse;
 pub mod canvas;
+pub mod clip_dialog;
 pub mod codec_dialog;
 pub mod controls;
 pub mod dialog;
